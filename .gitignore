@@ -1,0 +1,27 @@
+.DS_Store
+
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+*.xcuserdata/
+xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Editor
+.vscode/
+
+# macOS app packaging/signing artifacts
+*.app
+*.appex
+*.dSYM
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
