@@ -468,7 +468,9 @@ public final class GitService: Sendable {
     private func runGit(_ arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
         try await executor.run(
             executableURL: gitExecutableURL,
-            arguments: arguments,
+            // Ignore working-tree executable-bit noise consistently for status,
+            // diffs and staging without changing the repository's configuration.
+            arguments: ["-c", "core.filemode=false"] + arguments,
             workingDirectory: workingDirectory
         )
     }
