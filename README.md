@@ -214,6 +214,7 @@ Then re-check System Settings and the Finder right-click menu.
 
 ## Notes
 
+- GitView ignores working-tree executable-permission changes for all repositories using a per-command `core.filemode=false` override. Content edits remain visible, and repository/global Git configuration is unchanged. Explicitly staged permission changes remain visible.
 - The initial MVP intentionally avoids App Sandbox for the main app.
 - Finder integration is local-development oriented for now.
 - Public distribution, Developer ID signing, notarization, and sandboxing can be added after the core app is stable.
