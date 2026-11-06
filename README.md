@@ -4,17 +4,16 @@ GitView is a local SwiftUI macOS Git client for inspecting and working with repo
 
 ## Current Features
 
-- Open a local Git repository.
-- Detect the Git executable from common locations.
-- Show repository name, current branch, and repository status.
-- List modified, staged, and untracked files.
-- Select files and commit selected changes.
-- View unified text diffs.
-- Pull from the current upstream or from another branch.
-- Push to the configured upstream.
-- Search and switch branches by branch name.
-- Revert selected changed files.
-- Open a folder from Finder through the Finder integration.
+- **Open repositories** from the Open panel (⌘O), the Recent list, drag and drop, or Finder. Selecting a subfolder or a file opens its repository root.
+- **Changes** — files grouped into Merge Conflicts, Staged Changes, Changes and Untracked Files. Stage, unstage, Stage All, Unstage All, and discard (with confirmation). Press Space to stage or unstage the selected file.
+- **Diff viewer** — unified diff with old/new line numbers, staged and unstaged diffs, binary detection, and ⌘F find.
+- **Commit** staged changes (⌘↩). The commit hash and subject appear in the status bar.
+- **Fetch, Pull, Push** — pull shows a preview first (incoming commits and files, possible conflicts, merge/rebase/fast-forward). Push asks before publishing a branch with no upstream. Git output is kept in the Output log (⇧⌘L).
+- **History** — latest 100 commits with paging, filter, branch/tag chips, and commit details with changed files and per-file diffs.
+- **Branches** — local and remote branches with ahead/behind, filtering, searching the remote for unfetched branches, and switching (double-click). Git errors are shown as-is; nothing is forced or stashed.
+- **Open in Terminal** (⌥⌘T), **Open in VS Code** (⌥⌘V; `code` CLI first, then the app), **Reveal in Finder**.
+- Refreshes automatically when GitView becomes active.
+- Finder context-menu and toolbar submenu: Open GitView, Git Status, Pull, Push, Git Log.
 
 ## Requirements
 
@@ -66,6 +65,13 @@ GitView
 
 SwiftUI views should not execute shell commands directly. Git commands should go through the shared Git service and process execution layer.
 
+- `Shared/GitCommands` — `GitService` (all Git operations), `ProcessExecutor`, and parsers for status (porcelain v2 `-z`), log, branches and diffs.
+- `GitViewApp/ViewModels/RepositoryViewModel.swift` — per-window state; Git operations run one at a time through an operation queue.
+- `GitViewApp/Services` — recent repositories and external apps (Terminal, VS Code, Finder).
+- `swift test` covers the parsers and a full workflow against a temporary repository.
+
+The Xcode project lists source files explicitly. When adding a file, also add it to `GitView.xcodeproj` (Xcode: File → Add Files…).
+
 ## Finder Integration
 
 GitView includes two Finder entry points:
@@ -76,8 +82,10 @@ GitView includes two Finder entry points:
 Both open the app with a deep link like:
 
 ```text
-gitview://open?path=/path/to/repository
+gitview://open?path=/path/to/repository&action=status
 ```
+
+`action` is one of `open` (default), `status`, `pull`, `push`, `log`. Links go to the existing window instead of opening a new one.
 
 ### Why Installation Matters
 
@@ -181,7 +189,7 @@ plutil -p "$HOME/Applications/GitView.app/Contents/Info.plist" | rg "NSServices|
 1. Open Finder.
 2. Select a repository folder.
 3. Right-click the folder.
-4. Look for `Open in GitView`.
+4. Look for the `GitView` submenu (Finder Sync extension) or `Open in GitView` (Services).
 
 Depending on macOS, the item can appear in one of these places:
 

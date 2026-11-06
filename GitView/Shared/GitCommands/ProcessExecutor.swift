@@ -14,6 +14,7 @@ public struct ProcessExecutor: ProcessExecuting {
             process.arguments = arguments
             process.currentDirectoryURL = workingDirectory
             process.environment = Self.gitProcessEnvironment()
+            process.standardInput = FileHandle.nullDevice
 
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -65,6 +66,14 @@ public struct ProcessExecutor: ProcessExecuting {
                 return true
             }
             .joined(separator: ":")
+
+        // GitView has no terminal: fail fast instead of waiting for a prompt
+        // that can never be answered. Credential helpers and SSH agents still work.
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        // Background refreshes must not take index locks other tools may need.
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
+        // Never open an editor for merge commit messages created by pull.
+        environment["GIT_MERGE_AUTOEDIT"] = "no"
 
         return environment
     }
