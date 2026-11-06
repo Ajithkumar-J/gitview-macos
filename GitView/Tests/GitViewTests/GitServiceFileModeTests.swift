@@ -2,6 +2,14 @@ import Foundation
 import XCTest
 @testable import Shared
 
+func XCTAssertNoThrowAsync(_ body: () async throws -> Void, file: StaticString = #filePath, line: UInt = #line) async {
+    do {
+        try await body()
+    } catch {
+        XCTFail("Unexpected error: \(error.localizedDescription)", file: file, line: line)
+    }
+}
+
 final class GitServiceFileModeTests: XCTestCase {
     func testPermissionNoiseIsIgnoredWithoutLosingContentEditsOrStagingModes() async throws {
         let repository = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -34,7 +42,8 @@ final class GitServiceFileModeTests: XCTestCase {
         let diff = try await service.diff(for: XCTUnwrap(files.first), mode: .unstaged, in: repository)
         XCTAssertTrue(diff.contains("+updated"))
         XCTAssertFalse(diff.contains("new mode"))
-        _ = try await service.commitSelected(files: files, message: "Content edit", in: repository)
+        try await service.stage(files, in: repository)
+        await XCTAssertNoThrowAsync { _ = try await service.commit(message: "Content edit", in: repository) }
         let committed = try await run(["show", "--format=", "--summary", "HEAD"])
         XCTAssertFalse(committed.standardOutput.contains("mode change"))
         let config = try await run(["config", "--get", "core.filemode"])

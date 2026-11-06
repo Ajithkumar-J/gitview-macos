@@ -1,49 +1,124 @@
 import AppKit
 import Foundation
+import Observation
 #if canImport(Shared)
 import Shared
 #endif
 
+/// State and actions for one GitView window. Views call these methods; only
+/// `GitService` talks to Git.
 @MainActor
-final class RepositoryViewModel: ObservableObject {
-    @Published private(set) var snapshot: GitRepositorySnapshot?
-    @Published private(set) var gitExecutablePath = "Detecting Git..."
-    @Published private(set) var isLoading = false
-    @Published private(set) var isLoadingDiff = false
-    @Published var selectedSection: AppSection = .changes
-    @Published var selectedFile: GitFileStatus?
-    @Published var selectedCommitFileIDs = Set<String>()
-    @Published var selectedDiffMode: GitDiffMode = .unstaged
-    @Published var selectedPullStrategy: GitPullStrategy = .merge
-    @Published var pullSourceBranch = ""
-    @Published var branchSearchText = ""
-    @Published private(set) var remoteBranchSearchResults = [GitBranch]()
-    @Published private(set) var isSearchingBranches = false
-    @Published var commitMessage = ""
-    @Published private(set) var diffText = "Select a changed file to view its diff."
-    @Published var operationMessage: String?
-    @Published var pendingRemoteOperation: GitRemoteOperation?
-    @Published var pendingPullPreview: GitPullPreview?
-    @Published var pendingRevertFile: GitFileStatus?
-    @Published var errorMessage: String?
+@Observable
+final class RepositoryViewModel {
+    // MARK: Environment
 
-    private let gitService: GitService?
+    private(set) var gitService: GitService?
+    private(set) var gitVersion: String?
+    let recents = RecentRepositories.shared
 
-    init() {
-        do {
-            let service = try GitService()
-            self.gitService = service
-            self.gitExecutablePath = service.gitExecutableURL.path
-        } catch {
-            self.gitService = nil
-            self.gitExecutablePath = "Unavailable"
-            self.errorMessage = error.localizedDescription
+    // MARK: Repository
+
+    private(set) var snapshot: GitRepositorySnapshot?
+    var section: AppSection = .changes
+    private(set) var isOpening = false
+    private(set) var isRefreshing = false
+
+    // MARK: Activity / feedback
+
+    /// Non-nil while a long-running operation (pull, push, commit, …) runs.
+    private(set) var activity: String?
+    private(set) var statusMessage: StatusMessage?
+    private(set) var outputLog: [OutputEntry] = []
+    var isShowingOutputLog = false
+    var alert: AlertContent?
+
+    var isBusy: Bool {
+        activity != nil
+    }
+
+    // MARK: Changes
+
+    var selectedChangeID: GitChange.ID? {
+        didSet {
+            if oldValue != selectedChangeID {
+                loadSelectedChangeDiff()
+            }
         }
     }
+    private(set) var changeDiff: DiffState = .placeholder("Select a file to see its changes.")
+    var commitMessage = ""
+    var pendingDiscard: GitChange?
+
+    // MARK: Remote operations
+
+    var pendingRemoteOperation: GitRemoteOperation?
+    var pendingPullPreview: GitPullPreview?
+    var pullSourceBranch = ""
+    var selectedPullStrategy: GitPullStrategy = .merge
+    private(set) var isPreparingPull = false
+
+    // MARK: History
+
+    private(set) var commits: [GitCommit] = []
+    private(set) var isLoadingHistory = false
+    private(set) var canLoadMoreHistory = false
+    private var historyHeadOID: String??
+    var historyFilter = ""
+    var selectedCommitID: GitCommit.ID? {
+        didSet {
+            if oldValue != selectedCommitID {
+                loadSelectedCommitDetail()
+            }
+        }
+    }
+    private(set) var commitDetail: CommitDetailState = .none
+    var selectedCommitFileID: GitCommitFile.ID? {
+        didSet {
+            if oldValue != selectedCommitFileID {
+                loadSelectedCommitFileDiff()
+            }
+        }
+    }
+    private(set) var commitFileDiff: DiffState = .placeholder("Select a file to see its changes.")
+
+    // MARK: Branches
+
+    private(set) var branches: [GitBranch] = []
+    var branchFilter = ""
+    private(set) var remoteSearchResults: [GitBranch] = []
+    private(set) var isSearchingRemote = false
+    var selectedBranchID: GitBranch.ID?
+
+    // MARK: Private
+
+    @ObservationIgnored private var operationChain: Task<Void, Never>?
+    @ObservationIgnored private var isRefreshQueued = false
+    @ObservationIgnored private var diffTask: Task<Void, Never>?
+    @ObservationIgnored private var commitDetailTask: Task<Void, Never>?
+    @ObservationIgnored private var commitFileDiffTask: Task<Void, Never>?
+
+    init() {
+        detectGit()
+    }
+
+    func detectGit() {
+        do {
+            let service = try GitService()
+            gitService = service
+            Task {
+                gitVersion = await service.version()
+            }
+        } catch {
+            gitService = nil
+        }
+    }
+
+    // MARK: - Opening
 
     func chooseRepository() {
         let panel = NSOpenPanel()
         panel.title = "Open Git Repository"
+        panel.message = "Choose a Git working copy or any folder inside one."
         panel.prompt = "Open"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -53,411 +128,719 @@ final class RepositoryViewModel: ObservableObject {
             return
         }
 
+        open(url)
+    }
+
+    func open(_ url: URL, then action: GitViewDeepLink.Action = .open) {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        // A file (e.g. right-clicked in Finder) opens the repository that contains it.
+        let url = exists && !isDirectory.boolValue ? url.deletingLastPathComponent() : url
         Task {
             await openRepository(at: url)
+            guard snapshot != nil else { return }
+            switch action {
+            case .open, .status:
+                section = .changes
+            case .log:
+                section = .history
+            case .pull:
+                requestPull()
+            case .push:
+                requestPush()
+            }
         }
     }
 
-    func refresh() {
-        guard let rootPath = snapshot?.rootPath else {
+    func handle(deepLink url: URL) {
+        guard let link = GitViewDeepLink(url: url) else {
             return
         }
 
-        Task {
-            await openRepository(at: rootPath)
-        }
+        open(URL(fileURLWithPath: link.path, isDirectory: true), then: link.action)
     }
 
-    func openRepository(at url: URL) async {
+    func closeRepository() {
+        snapshot = nil
+        resetRepositoryState()
+    }
+
+    private func openRepository(at url: URL) async {
         guard let gitService else {
-            errorMessage = "Git is not installed or could not be found."
             return
         }
 
-        isLoading = true
-        errorMessage = nil
+        isOpening = true
+        defer { isOpening = false }
 
         do {
-            let loadedSnapshot = try await gitService.loadRepository(at: url)
-            snapshot = loadedSnapshot
-            pullSourceBranch = loadedSnapshot.upstreamBranch ?? ""
-            selectedCommitFileIDs = defaultCommitSelection(for: loadedSnapshot.files)
-            if let selectedFile, loadedSnapshot.files.contains(where: { $0.id == selectedFile.id }) {
-                await loadDiff(for: selectedFile)
-            } else {
-                selectedFile = nil
-                diffText = loadedSnapshot.files.isEmpty
-                    ? "Working tree clean."
-                    : "Select a changed file to view its diff."
+            let loaded = try await gitService.loadRepository(at: url)
+            let isSameRepository = loaded.rootPath == snapshot?.rootPath
+            if !isSameRepository {
+                resetRepositoryState()
+            }
+            snapshot = loaded
+            pullSourceBranch = loaded.upstreamBranch ?? ""
+            recents.add(loaded.rootPath)
+            await loadBranches()
+            if !isSameRepository {
+                statusMessage = StatusMessage(text: "Opened \(loaded.name)", kind: .info)
             }
         } catch {
-            errorMessage = error.localizedDescription
-        }
-
-        isLoading = false
-    }
-
-    func openRepository(fromDeepLink url: URL) {
-        guard url.scheme == "gitview", url.host == "open" else {
-            return
-        }
-
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        guard let path = components?.queryItems?.first(where: { $0.name == "path" })?.value, !path.isEmpty else {
-            return
-        }
-
-        Task {
-            await openRepository(at: URL(fileURLWithPath: path))
+            if case GitServiceError.notARepository = error {
+                alert = AlertContent(title: "Not a Git Repository", message: error.localizedDescription)
+            } else {
+                alert = AlertContent(title: "Could Not Open Repository", message: error.localizedDescription)
+            }
         }
     }
 
-    func selectFile(_ file: GitFileStatus) {
-        selectedFile = file
-        if file.state == .untracked {
-            selectedDiffMode = .unstaged
-        } else if file.isStaged {
-            selectedDiffMode = .staged
-        } else {
-            selectedDiffMode = .unstaged
-        }
-
-        Task {
-            await loadDiff(for: file)
-        }
+    private func resetRepositoryState() {
+        section = .changes
+        selectedChangeID = nil
+        changeDiff = .placeholder("Select a file to see its changes.")
+        commitMessage = ""
+        commits = []
+        historyHeadOID = nil
+        canLoadMoreHistory = false
+        historyFilter = ""
+        selectedCommitID = nil
+        commitDetail = .none
+        branches = []
+        branchFilter = ""
+        remoteSearchResults = []
+        selectedBranchID = nil
+        pendingPullPreview = nil
+        pullSourceBranch = ""
     }
 
-    func changeDiffMode(_ mode: GitDiffMode) {
-        selectedDiffMode = mode
-        guard let selectedFile else {
+    // MARK: - Refresh
+
+    func refresh() {
+        guard snapshot != nil, !isRefreshQueued else {
             return
         }
 
-        Task {
-            await loadDiff(for: selectedFile)
+        isRefreshQueued = true
+        enqueue { [weak self] in
+            guard let self else { return }
+            self.isRefreshQueued = false
+            await self.reload()
         }
     }
 
-    private func loadDiff(for file: GitFileStatus) async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath else {
-            diffText = "Open a repository before viewing diffs."
+    /// Re-reads status, branches and (if HEAD moved) history, keeping selections.
+    private func reload() async {
+        guard let gitService, let root = snapshot?.rootPath else {
             return
         }
 
-        isLoadingDiff = true
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         do {
-            diffText = try await gitService.diff(for: file, mode: selectedDiffMode, in: repositoryURL)
+            let loaded = try await gitService.loadRepository(at: root)
+            let previousHead = snapshot?.headOID
+            snapshot = loaded
+            if pullSourceBranch.isEmpty {
+                pullSourceBranch = loaded.upstreamBranch ?? ""
+            }
+
+            let changeIDs = Set(Self.allChanges(in: loaded).map(\.id))
+            if let selectedChangeID, !changeIDs.contains(selectedChangeID) {
+                self.selectedChangeID = nil
+            } else {
+                loadSelectedChangeDiff()
+            }
+
+            await loadBranches()
+
+            if previousHead != loaded.headOID, historyHeadOID != nil {
+                await loadHistory(reset: true)
+            }
         } catch {
-            diffText = error.localizedDescription
+            if case GitServiceError.notARepository = error {
+                alert = AlertContent(title: "Repository Unavailable", message: "\(root.path) is no longer a Git repository.")
+                closeRepository()
+            } else {
+                postError(title: "Refresh Failed", error)
+            }
         }
-        isLoadingDiff = false
     }
 
-    func toggleCommitSelection(for file: GitFileStatus) {
-        guard canCommit(file) else {
+    // MARK: - Operation queue
+
+    /// Runs Git operations one after another so quick clicks never race.
+    private func enqueue(_ body: @escaping @MainActor () async -> Void) {
+        let previous = operationChain
+        operationChain = Task { @MainActor in
+            await previous?.value
+            await body()
+        }
+    }
+
+    /// Runs a mutating operation, records its output and refreshes afterwards.
+    private func perform(
+        _ activityText: String,
+        failureTitle: String,
+        announce: Bool = true,
+        success: String? = nil,
+        _ work: @escaping @MainActor (GitService, URL) async throws -> String?
+    ) {
+        enqueue { [weak self] in
+            guard let self, let gitService = self.gitService, let root = self.snapshot?.rootPath else {
+                return
+            }
+
+            if announce {
+                self.activity = activityText
+            }
+
+            do {
+                if let message = try await work(gitService, root) {
+                    self.log(title: activityText.replacingOccurrences(of: "…", with: ""), text: message, isError: false)
+                    if announce {
+                        self.statusMessage = StatusMessage(text: success ?? Self.firstLine(of: message), kind: .success)
+                    }
+                }
+            } catch {
+                self.postError(title: failureTitle, error)
+            }
+
+            await self.reload()
+            self.activity = nil
+        }
+    }
+
+    private func postError(title: String, _ error: Error) {
+        let message = error.localizedDescription
+        log(title: title, text: message, isError: true)
+        statusMessage = StatusMessage(text: title, kind: .error)
+        alert = AlertContent(title: title, message: message)
+    }
+
+    func log(title: String, text: String, isError: Bool) {
+        outputLog.append(OutputEntry(title: title, text: text, isError: isError))
+        if outputLog.count > 200 {
+            outputLog.removeFirst(outputLog.count - 200)
+        }
+    }
+
+    func clearOutputLog() {
+        outputLog.removeAll()
+    }
+
+    private static func firstLine(of text: String) -> String {
+        text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+    }
+
+    // MARK: - Changes
+
+    static func allChanges(in snapshot: GitRepositorySnapshot) -> [GitChange] {
+        GitChangeArea.allCases.flatMap { snapshot.changes(in: $0) }
+    }
+
+    var selectedChange: GitChange? {
+        guard let snapshot, let selectedChangeID else {
+            return nil
+        }
+        return Self.allChanges(in: snapshot).first { $0.id == selectedChangeID }
+    }
+
+    var stagedCount: Int {
+        snapshot?.stagedCount ?? 0
+    }
+
+    var canCommit: Bool {
+        stagedCount > 0
+            && !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !(snapshot?.hasConflicts ?? false)
+            && !isBusy
+    }
+
+    var commitDisabledReason: String? {
+        guard let snapshot else { return nil }
+        if snapshot.hasConflicts { return "Resolve merge conflicts before committing." }
+        if stagedCount == 0 { return snapshot.files.isEmpty ? "No changes to commit." : "Stage files to include them in the commit." }
+        if commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a commit message." }
+        return nil
+    }
+
+    private func loadSelectedChangeDiff() {
+        diffTask?.cancel()
+        guard let change = selectedChange, let gitService, let root = snapshot?.rootPath else {
+            changeDiff = .placeholder(snapshot?.files.isEmpty == true ? "Working tree clean." : "Select a file to see its changes.")
             return
         }
 
-        if selectedCommitFileIDs.contains(file.id) {
-            selectedCommitFileIDs.remove(file.id)
+        if case .loaded = changeDiff {
+            // Keep showing the old diff while refreshing to avoid flicker.
         } else {
-            selectedCommitFileIDs.insert(file.id)
+            changeDiff = .loading
+        }
+
+        diffTask = Task {
+            let state = await Self.loadDiff { try await gitService.diff(for: change, in: root) }
+            guard !Task.isCancelled else { return }
+            changeDiff = state
         }
     }
 
-    func selectAllCommitFiles() {
-        guard let files = snapshot?.files else {
+    nonisolated private static func loadDiff(_ load: @Sendable () async throws -> String) async -> DiffState {
+        do {
+            let text = try await load()
+            let diff = await Task.detached(priority: .userInitiated) { GitDiffParser.parse(text) }.value
+            return diff.isEmpty ? .placeholder("No textual changes.") : .loaded(diff)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    func stage(_ change: GitChange) {
+        stage([change])
+    }
+
+    func stage(_ changes: [GitChange]) {
+        let files = changes.map(\.file)
+        moveSelectionIfNeeded(from: changes, to: .staged)
+        perform("Staging…", failureTitle: "Stage Failed", announce: false) { service, root in
+            try await service.stage(files, in: root)
+            return nil
+        }
+    }
+
+    func unstage(_ changes: [GitChange]) {
+        let files = changes.map(\.file)
+        moveSelectionIfNeeded(from: changes, to: .unstaged)
+        perform("Unstaging…", failureTitle: "Unstage Failed", announce: false) { service, root in
+            try await service.unstage(files, in: root)
+            return nil
+        }
+    }
+
+    func stageAll() {
+        perform("Staging all changes…", failureTitle: "Stage Failed", announce: false) { service, root in
+            try await service.stageAll(in: root)
+            return nil
+        }
+    }
+
+    func unstageAll() {
+        perform("Unstaging all changes…", failureTitle: "Unstage Failed", announce: false) { service, root in
+            try await service.unstageAll(in: root)
+            return nil
+        }
+    }
+
+    func toggleStage(_ change: GitChange) {
+        switch change.area {
+        case .staged:
+            unstage([change])
+        case .unstaged, .untracked, .conflicted:
+            stage([change])
+        }
+    }
+
+    /// Keeps the diff on the same file after it moves between lists.
+    private func moveSelectionIfNeeded(from changes: [GitChange], to area: GitChangeArea) {
+        guard let selected = selectedChange, changes.contains(selected) else {
+            return
+        }
+        let targetArea = selected.file.isUntracked && area == .unstaged ? .untracked : area
+        selectedChangeID = GitChange(file: selected.file, area: targetArea).id
+    }
+
+    func requestDiscard(_ change: GitChange) {
+        pendingDiscard = change
+    }
+
+    func confirmDiscard() {
+        guard let change = pendingDiscard else { return }
+        pendingDiscard = nil
+        perform("Discarding changes…", failureTitle: "Discard Failed") { service, root in
+            try await service.discardChanges(change, in: root)
+        }
+    }
+
+    func commit() {
+        guard canCommit else {
+            if let reason = commitDisabledReason {
+                statusMessage = StatusMessage(text: reason, kind: .info)
+            }
             return
         }
 
-        selectedCommitFileIDs = Set(files.filter(canCommit).map(\.id))
-    }
-
-    func clearCommitSelection() {
-        selectedCommitFileIDs.removeAll()
-    }
-
-    func canCommit(_ file: GitFileStatus) -> Bool {
-        !file.isConflicted
-    }
-
-    var selectedCommitFilesCount: Int {
-        snapshot?.files.filter { selectedCommitFileIDs.contains($0.id) }.count ?? 0
-    }
-
-    var canCommitSelectedFiles: Bool {
-        selectedCommitFilesCount > 0 && !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isLoading
-    }
-
-    var remoteTargetDescription: String {
-        snapshot?.upstreamBranch ?? "origin/\(snapshot?.branch ?? "")"
-    }
-
-    var remoteConfirmationMessage: String {
-        guard let snapshot, let pendingRemoteOperation else {
-            return ""
-        }
-
-        switch pendingRemoteOperation {
-        case .pull:
-            return "Pull changes from \(pendingPullPreview?.target ?? snapshot.branch) using \(selectedPullStrategy.rawValue)?"
-        case .push:
-            return "Push commits to \(snapshot.upstreamBranch ?? snapshot.branch)?"
-        case .pushSetUpstream:
-            return "This branch has no upstream. Push and set upstream to origin/\(snapshot.branch)?"
+        let message = commitMessage
+        perform("Committing…", failureTitle: "Commit Failed") { [weak self] service, root in
+            let outcome = try await service.commit(message: message, in: root)
+            self?.commitMessage = ""
+            self?.selectedChangeID = nil
+            return "Committed \(outcome.shortHash) — \(outcome.subject)"
         }
     }
 
-    var remoteConfirmationButtonTitle: String {
-        pendingRemoteOperation?.rawValue ?? "Continue"
+    // MARK: - Remote operations
+
+    var remoteName: String? {
+        snapshot?.defaultRemote
+    }
+
+    func fetch() {
+        guard snapshot?.remotes.isEmpty == false else {
+            alert = AlertContent(title: "No Remote", message: GitServiceError.noRemoteConfigured.localizedDescription)
+            return
+        }
+
+        perform("Fetching…", failureTitle: "Fetch Failed", success: "Fetched from \(remoteName ?? "remote")") { service, root in
+            try await service.fetch(in: root)
+        }
     }
 
     func requestPull() {
-        Task {
-            await preparePull()
+        guard let snapshot else { return }
+        guard !snapshot.isDetachedHead else {
+            alert = AlertContent(title: "Cannot Pull", message: GitServiceError.detachedHeadRemoteOperation.localizedDescription)
+            return
+        }
+        guard !snapshot.remotes.isEmpty else {
+            alert = AlertContent(title: "Cannot Pull", message: GitServiceError.noRemoteConfigured.localizedDescription)
+            return
+        }
+
+        if pullSourceBranch.isEmpty {
+            pullSourceBranch = snapshot.upstreamBranch ?? ""
+        }
+        pendingPullPreview = nil
+        pendingRemoteOperation = .pull
+        if !pullSourceBranch.isEmpty {
+            preparePull()
+        }
+    }
+
+    /// Fetches the pull source and computes what the pull would bring in.
+    func preparePull() {
+        guard let gitService, let snapshot else { return }
+        let source = pullSourceBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = remoteName
+        isPreparingPull = true
+        pendingPullPreview = nil
+
+        enqueue { [weak self] in
+            guard let self else { return }
+            do {
+                self.pendingPullPreview = try await gitService.pullPreview(
+                    sourceBranch: source.isEmpty ? nil : source,
+                    localFiles: snapshot.files,
+                    remote: remote,
+                    in: snapshot.rootPath
+                )
+            } catch GitServiceError.emptyPullSource {
+                self.pendingPullPreview = nil
+            } catch {
+                self.pendingRemoteOperation = nil
+                self.postError(title: "Pull Preview Failed", error)
+            }
+            self.isPreparingPull = false
         }
     }
 
     func requestPush() {
-        guard let snapshot else {
-            errorMessage = "Open a repository before pushing."
+        guard let snapshot else { return }
+        guard !snapshot.isDetachedHead else {
+            alert = AlertContent(title: "Cannot Push", message: GitServiceError.detachedHeadRemoteOperation.localizedDescription)
+            return
+        }
+        guard !snapshot.remotes.isEmpty else {
+            alert = AlertContent(title: "Cannot Push", message: GitServiceError.noRemoteConfigured.localizedDescription)
+            return
+        }
+        guard snapshot.hasCommits else {
+            alert = AlertContent(title: "Nothing to Push", message: "Create a commit before pushing.")
             return
         }
 
         pendingRemoteOperation = snapshot.upstreamBranch == nil ? .pushSetUpstream : .push
     }
 
+    func cancelRemoteOperation() {
+        pendingRemoteOperation = nil
+        pendingPullPreview = nil
+    }
+
     func confirmRemoteOperation() {
-        guard let operation = pendingRemoteOperation else {
+        guard let operation = pendingRemoteOperation, let snapshot else {
             return
         }
 
         pendingRemoteOperation = nil
-        Task {
-            await runRemoteOperation(operation)
+        let remote = remoteName
+        let branch = snapshot.branch
+
+        switch operation {
+        case .pull:
+            let source = pendingPullPreview?.sourceBranch
+            let target = pendingPullPreview?.target ?? snapshot.upstreamBranch ?? "upstream"
+            let strategy = selectedPullStrategy
+            perform("Pulling from \(target)…", failureTitle: "Pull Failed", success: "Pulled from \(target)") { service, root in
+                try await service.pull(sourceBranch: source, strategy: strategy, remote: remote, in: root)
+            }
+        case .push:
+            perform("Pushing to \(snapshot.upstreamBranch ?? branch)…", failureTitle: "Push Failed", success: "Pushed to \(snapshot.upstreamBranch ?? branch)") { service, root in
+                try await service.push(in: root)
+            }
+        case .pushSetUpstream:
+            perform("Pushing to \(remote ?? "remote")/\(branch)…", failureTitle: "Push Failed", success: "Published \(branch) to \(remote ?? "remote")") { service, root in
+                try await service.pushSetUpstream(branch: branch, remote: remote, in: root)
+            }
+        }
+        pendingPullPreview = nil
+    }
+
+    var remoteConfirmationTitle: String {
+        switch pendingRemoteOperation {
+        case .pushSetUpstream: "Publish Branch?"
+        default: "Push Commits?"
         }
     }
 
-    func preparePullFromTypedBranch() {
-        Task {
-            await preparePull()
+    var remoteConfirmationMessage: String {
+        guard let snapshot else { return "" }
+        switch pendingRemoteOperation {
+        case .pushSetUpstream:
+            return "“\(snapshot.branch)” has no upstream branch. GitView will run:\n\ngit push --set-upstream \(remoteName ?? "origin") \(snapshot.branch)"
+        case .push:
+            let count = snapshot.aheadCount
+            let commits = count == 1 ? "1 commit" : "\(count) commits"
+            return count > 0
+                ? "Push \(commits) to \(snapshot.upstreamBranch ?? snapshot.branch)?"
+                : "\(snapshot.upstreamBranch ?? snapshot.branch) already has all local commits. Push anyway?"
+        default:
+            return ""
         }
     }
 
-    func commitSelectedFiles() {
+    // MARK: - External apps
+
+    func openInTerminal() {
+        guard let root = snapshot?.rootPath else { return }
         Task {
-            await commitSelectedFiles()
+            do {
+                try await ExternalApps.openTerminal(at: root)
+            } catch {
+                alert = AlertContent(title: "Could Not Open Terminal", message: error.localizedDescription)
+            }
         }
     }
 
-    private func commitSelectedFiles() async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath, let files = snapshot?.files else {
-            errorMessage = "Open a repository before committing."
+    func openInVSCode(_ relativePath: String? = nil) {
+        guard let root = snapshot?.rootPath else { return }
+        var urls = [root]
+        if let relativePath {
+            urls.append(root.appendingPathComponent(relativePath))
+        }
+        Task {
+            do {
+                try await ExternalApps.openInVSCode(urls)
+            } catch {
+                alert = AlertContent(title: "Could Not Open VS Code", message: error.localizedDescription)
+            }
+        }
+    }
+
+    func revealInFinder(_ relativePath: String? = nil) {
+        guard let root = snapshot?.rootPath else { return }
+        ExternalApps.revealInFinder(relativePath.map { root.appendingPathComponent($0) } ?? root)
+    }
+
+    func copyPath(_ relativePath: String) {
+        ExternalApps.copyToPasteboard(relativePath)
+        statusMessage = StatusMessage(text: "Copied \(relativePath)", kind: .info)
+    }
+}
+
+// MARK: - History
+
+extension RepositoryViewModel {
+    var filteredCommits: [GitCommit] {
+        let query = historyFilter.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            return commits
+        }
+
+        return commits.filter {
+            $0.subject.localizedCaseInsensitiveContains(query)
+                || $0.authorName.localizedCaseInsensitiveContains(query)
+                || $0.hash.hasPrefix(query.lowercased())
+        }
+    }
+
+    var selectedCommit: GitCommit? {
+        commits.first { $0.id == selectedCommitID }
+    }
+
+    func loadHistoryIfNeeded() {
+        guard historyHeadOID == nil, !isLoadingHistory else {
             return
         }
 
-        let selectedFiles = files.filter { selectedCommitFileIDs.contains($0.id) && canCommit($0) }
-        isLoading = true
-        operationMessage = nil
-        errorMessage = nil
+        Task {
+            await loadHistory(reset: true)
+        }
+    }
+
+    func loadMoreHistory() {
+        guard canLoadMoreHistory, !isLoadingHistory else {
+            return
+        }
+
+        Task {
+            await loadHistory(reset: false)
+        }
+    }
+
+    fileprivate func loadHistory(reset: Bool) async {
+        guard let gitService, let snapshot else {
+            return
+        }
+
+        isLoadingHistory = true
+        defer { isLoadingHistory = false }
 
         do {
-            operationMessage = try await gitService.commitSelected(files: selectedFiles, message: commitMessage, in: repositoryURL)
-            commitMessage = ""
-            snapshot = try await gitService.loadRepository(at: repositoryURL)
-            pullSourceBranch = snapshot?.upstreamBranch ?? pullSourceBranch
-            selectedFile = nil
-            selectedCommitFileIDs = defaultCommitSelection(for: snapshot?.files ?? [])
-            diffText = snapshot?.files.isEmpty == true ? "Working tree clean." : "Select a changed file to view its diff."
+            let skip = reset ? 0 : commits.count
+            let page = try await gitService.history(skip: skip, in: snapshot.rootPath)
+            commits = reset ? page : commits + page
+            canLoadMoreHistory = page.count == GitService.historyPageSize
+            historyHeadOID = .some(snapshot.headOID)
+            if let selectedCommitID, !commits.contains(where: { $0.id == selectedCommitID }) {
+                self.selectedCommitID = nil
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            postError(title: "Could Not Load History", error)
         }
-
-        isLoading = false
     }
 
-    private func defaultCommitSelection(for files: [GitFileStatus]) -> Set<String> {
-        Set(files.filter { $0.state != .untracked && canCommit($0) }.map(\.id))
-    }
+    fileprivate func loadSelectedCommitDetail() {
+        commitDetailTask?.cancel()
+        selectedCommitFileID = nil
+        commitFileDiff = .placeholder("Select a file to see its changes.")
 
-    private func runRemoteOperation(_ operation: GitRemoteOperation) async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath else {
-            errorMessage = "Open a repository before running remote operations."
+        guard let hash = selectedCommitID, let gitService, let root = snapshot?.rootPath else {
+            commitDetail = .none
             return
         }
 
-        isLoading = true
-        operationMessage = nil
-        errorMessage = nil
+        commitDetail = .loading
+        commitDetailTask = Task {
+            do {
+                let detail = try await gitService.commitDetail(hash: hash, in: root)
+                guard !Task.isCancelled else { return }
+                commitDetail = .loaded(detail)
+                selectedCommitFileID = detail.files.first?.id
+            } catch {
+                guard !Task.isCancelled else { return }
+                commitDetail = .failed(error.localizedDescription)
+            }
+        }
+    }
 
+    fileprivate func loadSelectedCommitFileDiff() {
+        commitFileDiffTask?.cancel()
+        guard
+            case .loaded(let detail) = commitDetail,
+            let file = detail.files.first(where: { $0.id == selectedCommitFileID }),
+            let gitService,
+            let root = snapshot?.rootPath
+        else {
+            commitFileDiff = .placeholder("Select a file to see its changes.")
+            return
+        }
+
+        let hash = detail.commit.hash
+        commitFileDiff = .loading
+        commitFileDiffTask = Task {
+            let state = await Self.loadDiff { try await gitService.diff(for: file, inCommit: hash, in: root) }
+            guard !Task.isCancelled else { return }
+            commitFileDiff = state
+        }
+    }
+}
+
+// MARK: - Branches
+
+extension RepositoryViewModel {
+    var localBranches: [GitBranch] {
+        filteredBranches(branches.filter { !$0.isRemote })
+            .sorted { lhs, rhs in
+                if lhs.isCurrent != rhs.isCurrent { return lhs.isCurrent }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    var remoteBranches: [GitBranch] {
+        filteredBranches(branches.filter(\.isRemote))
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Branches found on the server that are not fetched locally yet.
+    var unfetchedRemoteBranches: [GitBranch] {
+        let known = Set(branches.map(\.name))
+        return remoteSearchResults.filter { !known.contains($0.name) }
+    }
+
+    var selectedBranch: GitBranch? {
+        (branches + remoteSearchResults).first { $0.id == selectedBranchID }
+    }
+
+    private func filteredBranches(_ list: [GitBranch]) -> [GitBranch] {
+        let query = branchFilter.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return list }
+        return list.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    fileprivate func loadBranches() async {
+        guard let gitService, let root = snapshot?.rootPath else { return }
         do {
-            let output: String
-            switch operation {
-            case .pull:
-                output = try await gitService.pull(sourceBranch: pendingPullPreview?.sourceBranch, strategy: selectedPullStrategy, in: repositoryURL)
-            case .push:
-                output = try await gitService.push(in: repositoryURL)
-            case .pushSetUpstream:
-                output = try await gitService.pushSetUpstream(branch: snapshot?.branch ?? "", in: repositoryURL)
-            }
-
-            operationMessage = output
-            snapshot = try await gitService.loadRepository(at: repositoryURL)
-            pullSourceBranch = snapshot?.upstreamBranch ?? pullSourceBranch
-            selectedCommitFileIDs = defaultCommitSelection(for: snapshot?.files ?? [])
-            if let selectedFile, snapshot?.files.contains(where: { $0.id == selectedFile.id }) == true {
-                await loadDiff(for: selectedFile)
-            } else {
-                selectedFile = nil
-                diffText = snapshot?.files.isEmpty == true ? "Working tree clean." : "Select a changed file to view its diff."
-            }
+            branches = try await gitService.branches(in: root)
         } catch {
-            errorMessage = error.localizedDescription
+            branches = []
+            log(title: "Could Not Load Branches", text: error.localizedDescription, isError: true)
         }
-
-        isLoading = false
-    }
-
-    func requestRevert(file: GitFileStatus) {
-        pendingRevertFile = file
-    }
-
-    func confirmRevert() {
-        guard let file = pendingRevertFile else {
-            return
-        }
-
-        pendingRevertFile = nil
-        Task {
-            await revert(file: file)
-        }
-    }
-
-    private func revert(file: GitFileStatus) async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath else {
-            errorMessage = "Open a repository before reverting files."
-            return
-        }
-
-        isLoading = true
-        operationMessage = nil
-        errorMessage = nil
-
-        do {
-            operationMessage = try await gitService.revert(file: file, in: repositoryURL)
-            snapshot = try await gitService.loadRepository(at: repositoryURL)
-            pullSourceBranch = snapshot?.upstreamBranch ?? pullSourceBranch
-            selectedCommitFileIDs = defaultCommitSelection(for: snapshot?.files ?? [])
-            if selectedFile?.id == file.id {
-                selectedFile = nil
-                diffText = snapshot?.files.isEmpty == true ? "Working tree clean." : "Select a changed file to view its diff."
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-
-        isLoading = false
-    }
-
-    func switchBranch(to branch: GitBranch) {
-        guard !branch.isCurrent else {
-            return
-        }
-
-        Task {
-            await switchBranch(to: branch)
-        }
-    }
-
-    private func switchBranch(to branch: GitBranch) async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath else {
-            errorMessage = "Open a repository before switching branches."
-            return
-        }
-
-        isLoading = true
-        operationMessage = nil
-        errorMessage = nil
-
-        do {
-            if branch.isRemote {
-                _ = try await gitService.fetchRemoteBranch(branch, in: repositoryURL)
-            }
-            operationMessage = try await gitService.switchBranch(to: branch, in: repositoryURL)
-            snapshot = try await gitService.loadRepository(at: repositoryURL)
-            pullSourceBranch = snapshot?.upstreamBranch ?? ""
-            selectedFile = nil
-            selectedCommitFileIDs = defaultCommitSelection(for: snapshot?.files ?? [])
-            diffText = snapshot?.files.isEmpty == true ? "Working tree clean." : "Select a changed file to view its diff."
-            selectedSection = .changes
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-
-        isLoading = false
     }
 
     func searchRemoteBranches() {
+        let query = branchFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let gitService, let root = snapshot?.rootPath, let remote = remoteName, !query.isEmpty else {
+            return
+        }
+
+        isSearchingRemote = true
         Task {
-            await searchRemoteBranches()
+            defer { isSearchingRemote = false }
+            do {
+                remoteSearchResults = try await gitService.searchRemoteBranches(matching: query, remote: remote, in: root)
+                let newCount = unfetchedRemoteBranches.count
+                statusMessage = StatusMessage(
+                    text: newCount == 0 ? "No other branches on \(remote) match “\(query)”." : "Found \(newCount) unfetched branch\(newCount == 1 ? "" : "es") on \(remote).",
+                    kind: .info
+                )
+            } catch {
+                postError(title: "Remote Search Failed", error)
+            }
         }
     }
 
-    private func searchRemoteBranches() async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath else {
-            errorMessage = "Open a repository before searching branches."
-            return
-        }
-
-        let query = branchSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            remoteBranchSearchResults = []
-            errorMessage = "Enter a branch name to search."
-            return
-        }
-
-        isSearchingBranches = true
-        errorMessage = nil
-
-        do {
-            remoteBranchSearchResults = try await gitService.searchRemoteBranches(matching: query, in: repositoryURL)
-            if remoteBranchSearchResults.isEmpty {
-                operationMessage = "No remote branches found matching \"\(query)\"."
+    func switchBranch(to branch: GitBranch) {
+        guard !branch.isCurrent else { return }
+        let title = branch.isRemote ? "Checking out \(branch.localTrackingName)…" : "Switching to \(branch.name)…"
+        perform(title, failureTitle: "Unable to Switch Branch", success: "Switched to \(branch.localTrackingName)") { [weak self] service, root in
+            if branch.isUnfetched {
+                _ = try await service.fetchRemoteBranch(branch, in: root)
             }
-        } catch {
-            errorMessage = error.localizedDescription
+            let output = try await service.switchBranch(to: branch, in: root)
+            self?.selectedChangeID = nil
+            self?.remoteSearchResults = []
+            return output
         }
-
-        isSearchingBranches = false
-    }
-
-    private func preparePull() async {
-        guard let gitService, let repositoryURL = snapshot?.rootPath else {
-            errorMessage = "Open a repository before pulling."
-            return
-        }
-
-        isLoading = true
-        errorMessage = nil
-        pendingPullPreview = nil
-
-        do {
-            let typedSource = pullSourceBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-            pendingPullPreview = try await gitService.pullPreview(
-                sourceBranch: typedSource.isEmpty ? nil : typedSource,
-                localFiles: snapshot?.files ?? [],
-                in: repositoryURL
-            )
-            pendingRemoteOperation = .pull
-        } catch {
-            if case GitServiceError.emptyPullSource = error {
-                pendingRemoteOperation = .pull
-                errorMessage = nil
-            } else {
-                errorMessage = error.localizedDescription
-            }
-        }
-
-        isLoading = false
     }
 }
