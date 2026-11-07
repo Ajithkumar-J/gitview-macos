@@ -125,7 +125,7 @@ public enum GitLogParser {
         return (ahead, behind, false)
     }
 
-    static func parseDate(_ text: String) -> Date? {
+    public static func parseDate(_ text: String) -> Date? {
         try? Date(text.trimmingCharacters(in: .whitespacesAndNewlines), strategy: .iso8601)
     }
 

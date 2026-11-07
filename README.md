@@ -13,7 +13,7 @@ GitView is a local SwiftUI macOS Git client for inspecting and working with repo
 - **Branches** — local and remote branches with ahead/behind, filtering, searching the remote for unfetched branches, and switching (double-click). Git errors are shown as-is; nothing is forced or stashed.
 - **Open in Terminal** (⌥⌘T), **Open in VS Code** (⌥⌘V; `code` CLI first, then the app), **Reveal in Finder**.
 - Refreshes automatically when GitView becomes active.
-- Finder context-menu and toolbar submenu: Open GitView, Git Status, Pull, Push, Git Log.
+- **TortoiseGit-style Finder menu**: right-click any file or folder for Git commands; each command opens its own small window (see Finder Integration).
 
 ## Requirements
 
@@ -68,6 +68,7 @@ SwiftUI views should not execute shell commands directly. Git commands should go
 - `Shared/GitCommands` — `GitService` (all Git operations), `ProcessExecutor`, and parsers for status (porcelain v2 `-z`), log, branches and diffs.
 - `GitViewApp/ViewModels/RepositoryViewModel.swift` — per-window state; Git operations run one at a time through an operation queue.
 - `GitViewApp/Services` — recent repositories and external apps (Terminal, VS Code, Finder).
+- `GitViewApp/Commands` — the per-command windows opened from Finder (`CommandSession` + one dialog per command); Git operations for them are in `Shared/GitCommands/GitService+Commands.swift`.
 - `swift test` covers the parsers and a full workflow against a temporary repository.
 
 The Xcode project lists source files explicitly. When adding a file, also add it to `GitView.xcodeproj` (Xcode: File → Add Files…).
@@ -79,13 +80,22 @@ GitView includes two Finder entry points:
 - A Finder Sync extension with bundle identifier `com.local.GitView.FinderExtension`.
 - A macOS Services fallback named `Open in GitView`.
 
-Both open the app with a deep link like:
+The context menu works like TortoiseGit and adapts to what you right-click:
+
+| Right-click on | Menu |
+|---|---|
+| A folder that is not in a repository | **Git Clone…**, **Git Create Repository Here…** |
+| Anything inside a repository | **Git Commit → “branch”…** and a **GitView** submenu: Diff (files only), Show Log, Check for Modifications, Pull…, Fetch…, Push…, Switch/Checkout…, Create Branch…, Stash Changes…, Stash List / Pop…, Add…, Revert…, Open in GitView |
+
+Every command except Open in GitView opens its own window, scoped to the selected files or folders (for example, Commit on `Sources/` lists only changes under `Sources/`, and Show Log on a file shows that file's history). The window shows Git's output when the command finishes and offers the natural next step (Push… after a commit, Open after a clone). When GitView was launched only for a Finder command, it quits when that window closes.
+
+The extension never runs Git. It reads `.git` (read-only sandbox exception) to decide which menu to show and opens the app with a deep link:
 
 ```text
-gitview://open?path=/path/to/repository&action=status
+gitview://open?path=/path/one&path=/path/two&action=commit
 ```
 
-`action` is one of `open` (default), `status`, `pull`, `push`, `log`. Links go to the existing window instead of opening a new one.
+`action` is one of `open` (default), `commit`, `status`, `diff`, `log`, `add`, `revert`, `pull`, `fetch`, `push`, `switch`, `branch`, `stash`, `stash-pop`, `clone`, `init`. `open` goes to a main window (opening one if none is visible); everything else opens a command window. GitView brings itself to the front for every link.
 
 ### Why Installation Matters
 

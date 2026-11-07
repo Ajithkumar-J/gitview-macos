@@ -1,25 +1,94 @@
 import Foundation
 
-/// `gitview://open?path=<folder>&action=<action>` — used by the Finder extension
-/// and the Services menu to hand a folder to the main app.
+/// `gitview://open?path=<item>&path=<item>&action=<action>` — used by the Finder
+/// extension and the Services menu to hand Finder items to the main app.
 /// This file is compiled into both the app and the Finder extension, so it must
 /// not depend on anything else in Shared.
 public struct GitViewDeepLink: Equatable, Sendable {
+    /// One Finder command. `open` shows the main window; every other action
+    /// opens its own TortoiseGit-style command window.
     public enum Action: String, Sendable, CaseIterable {
         case open
+        case commit
         case status
-        case pull
-        case push
+        case diff
         case log
+        case add
+        case revert
+        case pull
+        case fetch
+        case push
+        case switchBranch = "switch"
+        case createBranch = "branch"
+        case stash
+        case stashPop = "stash-pop"
+        case clone
+        case createRepository = "init"
+
+        public var title: String {
+            switch self {
+            case .open: "Open GitView"
+            case .commit: "Commit"
+            case .status: "Check for Modifications"
+            case .diff: "Diff"
+            case .log: "Show Log"
+            case .add: "Add"
+            case .revert: "Revert"
+            case .pull: "Pull"
+            case .fetch: "Fetch"
+            case .push: "Push"
+            case .switchBranch: "Switch/Checkout"
+            case .createBranch: "Create Branch"
+            case .stash: "Stash Changes"
+            case .stashPop: "Stash Pop"
+            case .clone: "Clone"
+            case .createRepository: "Create Repository"
+            }
+        }
+
+        public var systemImage: String {
+            switch self {
+            case .open: "macwindow"
+            case .commit: "checkmark.circle"
+            case .status: "doc.text.magnifyingglass"
+            case .diff: "plusminus"
+            case .log: "clock.arrow.circlepath"
+            case .add: "plus.circle"
+            case .revert: "arrow.uturn.backward.circle"
+            case .pull: "arrow.down.circle"
+            case .fetch: "arrow.down.to.line.circle"
+            case .push: "arrow.up.circle"
+            case .switchBranch: "arrow.triangle.swap"
+            case .createBranch: "arrow.triangle.branch"
+            case .stash: "tray.and.arrow.down"
+            case .stashPop: "tray.and.arrow.up"
+            case .clone: "square.and.arrow.down.on.square"
+            case .createRepository: "folder.badge.plus"
+            }
+        }
     }
 
     public static let scheme = "gitview"
 
-    public let path: String
+    /// Selected Finder items (files or folders). Never empty.
+    public let paths: [String]
     public let action: Action
 
+    /// The first selected item.
+    public var path: String {
+        paths[0]
+    }
+
     public init(path: String, action: Action = .open) {
-        self.path = path
+        self.init(paths: [path], action: action)!
+    }
+
+    public init?(paths: [String], action: Action = .open) {
+        let paths = paths.filter { !$0.isEmpty }
+        guard !paths.isEmpty else {
+            return nil
+        }
+        self.paths = paths
         self.action = action
     }
 
@@ -29,11 +98,12 @@ public struct GitViewDeepLink: Equatable, Sendable {
         }
 
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        guard let path = items.first(where: { $0.name == "path" })?.value, !path.isEmpty else {
+        let paths = items.filter { $0.name == "path" }.compactMap(\.value).filter { !$0.isEmpty }
+        guard !paths.isEmpty else {
             return nil
         }
 
-        self.path = path
+        self.paths = paths
         self.action = items.first(where: { $0.name == "action" })?.value.flatMap(Action.init(rawValue:)) ?? .open
     }
 
@@ -41,7 +111,7 @@ public struct GitViewDeepLink: Equatable, Sendable {
         var components = URLComponents()
         components.scheme = Self.scheme
         components.host = "open"
-        components.queryItems = [URLQueryItem(name: "path", value: path)]
+        components.queryItems = paths.map { URLQueryItem(name: "path", value: $0) }
         if action != .open {
             components.queryItems?.append(URLQueryItem(name: "action", value: action.rawValue))
         }

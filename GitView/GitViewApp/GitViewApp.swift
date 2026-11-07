@@ -5,10 +5,12 @@ import Shared
 
 @main
 struct GitViewApp: App {
+    static let mainWindowID = "main"
+
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: Self.mainWindowID) {
             ContentView()
         }
         .defaultSize(width: 1240, height: 780)
