@@ -369,9 +369,11 @@ public final class GitService: Sendable {
 
     // MARK: - History
 
-    public func history(limit: Int = GitService.historyPageSize, skip: Int = 0, in repositoryURL: URL) async throws -> [GitCommit] {
+    /// Commits reachable from HEAD, newest first. `paths` limits the log to
+    /// commits touching those repository-relative paths.
+    public func history(limit: Int = GitService.historyPageSize, skip: Int = 0, paths: [String] = [], in repositoryURL: URL) async throws -> [GitCommit] {
         let result = try await runGit(
-            ["log", "--max-count=\(limit)", "--skip=\(skip)", "--date=iso-strict", GitLogParser.logFormat, "HEAD", "--"],
+            ["log", "--max-count=\(limit)", "--skip=\(skip)", "--date=iso-strict", GitLogParser.logFormat, "HEAD", "--"] + paths,
             workingDirectory: repositoryURL
         )
 
@@ -544,6 +546,12 @@ public final class GitService: Sendable {
                 throw GitServiceError.emptyPullSource
             }
 
+            // Name the upstream branch explicitly. A bare `git fetch`/`git pull` fetches every
+            // configured refspec, so one refspec for a branch deleted on the server
+            // ("couldn't find remote ref") would make the whole pull fail.
+            if let tracking = await upstreamRemoteAndBranch(in: repositoryURL) {
+                return PullTarget(displayName: upstream, remote: tracking.remote, sourceBranch: tracking.branch, comparisonRef: "FETCH_HEAD")
+            }
             return PullTarget(displayName: upstream, remote: nil, sourceBranch: nil, comparisonRef: "@{u}")
         }
 
@@ -560,14 +568,32 @@ public final class GitService: Sendable {
             displayName: "\(remote)/\(remoteBranch)",
             remote: remote,
             sourceBranch: remoteBranch,
-            comparisonRef: "\(remote)/\(remoteBranch)"
+            // FETCH_HEAD is what was just fetched, even when no refspec maps this
+            // branch to a remote-tracking ref.
+            comparisonRef: "FETCH_HEAD"
         )
+    }
+
+    /// Remote name and remote branch the current branch tracks, e.g. ("origin", "development").
+    func upstreamRemoteAndBranch(in repositoryURL: URL) async -> (remote: String, branch: String)? {
+        guard let branch = try? await currentBranch(in: repositoryURL), branch != "Detached HEAD",
+              let result = try? await runGit(
+                ["for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/\(branch)"],
+                workingDirectory: repositoryURL
+              ), result.success else {
+            return nil
+        }
+        let fields = result.standardOutput.trimmingCharacters(in: .newlines).split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        guard fields.count == 2, !fields[0].isEmpty, fields[1].hasPrefix("refs/heads/") else {
+            return nil
+        }
+        return (fields[0], String(fields[1].dropFirst("refs/heads/".count)))
     }
 
     // MARK: - Process helpers
 
     @discardableResult
-    private func runChecked(_ arguments: [String], in repositoryURL: URL) async throws -> GitCommandResult {
+    func runChecked(_ arguments: [String], in repositoryURL: URL) async throws -> GitCommandResult {
         let result = try await runGit(arguments, workingDirectory: repositoryURL)
         guard result.success else {
             throw GitServiceError.commandFailed(result)
@@ -575,7 +601,7 @@ public final class GitService: Sendable {
         return result
     }
 
-    private func runGit(_ arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
+    func runGit(_ arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
         try await executor.run(
             executableURL: gitExecutableURL,
             // Ignore working-tree executable-bit noise consistently for status,
@@ -586,7 +612,7 @@ public final class GitService: Sendable {
         )
     }
 
-    private func commandOutput(from result: GitCommandResult, fallback: String = "Command completed successfully.") -> String {
+    func commandOutput(from result: GitCommandResult, fallback: String = "Command completed successfully.") -> String {
         let combinedOutput = [result.standardOutput, result.standardError]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

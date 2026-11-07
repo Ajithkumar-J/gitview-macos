@@ -132,5 +132,12 @@ final class GitParsersTests: XCTestCase {
         XCTAssertEqual(GitViewDeepLink(url: url), link)
         XCTAssertEqual(GitViewDeepLink(url: URL(string: "gitview://open?path=/tmp")!)?.action, .open)
         XCTAssertNil(GitViewDeepLink(url: URL(string: "https://open?path=/tmp")!))
+
+        // Several Finder items, characters that need escaping, and every action.
+        for action in GitViewDeepLink.Action.allCases {
+            let multi = try XCTUnwrap(GitViewDeepLink(paths: ["/a b/c&d.txt", "/x/y+z#1"], action: action))
+            XCTAssertEqual(GitViewDeepLink(url: try XCTUnwrap(multi.url)), multi)
+        }
+        XCTAssertNil(GitViewDeepLink(paths: [], action: .commit))
     }
 }

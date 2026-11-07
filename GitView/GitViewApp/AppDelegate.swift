@@ -7,6 +7,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let servicesProvider = FinderServiceProvider()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Do not restore windows: after a Finder command GitView quits with no
+        // windows, and restoring "no windows" would leave Open GitView with nothing to show.
+        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
         // Take over gitview:// URL events before SwiftUI installs its own handler,
         // which would open an extra window for every link.
         NSAppleEventManager.shared().setEventHandler(
@@ -22,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
     }
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Launched from Finder just to run one command: behave like a dialog and quit with it.
+        MainActor.assumeIsolated { DeepLinkRouter.shared.isCommandOnlySession }
+    }
+
     @objc private func handleGetURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
         guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let url = URL(string: text) else {
             return
@@ -32,34 +40,143 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Delivers deep links to the most recently focused window, queueing them
-/// until a window exists after a cold launch.
+/// Brings GitView and one of its windows to the front, even when the request
+/// came from another app (Finder) that is currently active.
+@MainActor
+enum AppActivation {
+    static func bringToFront(_ window: NSWindow?) {
+        NSApp.unhide(nil)
+        if let window {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+        NSApp.activate()
+        // Since macOS 14 `activate()` is only a request that the system may decline
+        // while Finder is active. A Finder menu command is an explicit user request
+        // to show GitView, so fall back to the forcing variant (deprecated, hence
+        // called by selector to keep the build warning-free).
+        let forceActivate = NSSelectorFromString("activateIgnoringOtherApps:")
+        if NSApp.responds(to: forceActivate), let implementation = NSApp.method(for: forceActivate) {
+            typealias ActivateFunction = @convention(c) (AnyObject, Selector, ObjCBool) -> Void
+            unsafeBitCast(implementation, to: ActivateFunction.self)(NSApp, forceActivate, true)
+        }
+    }
+}
+
+/// Sends deep links to the right place: `open` goes to a main window (opening
+/// one when none is visible); every other action opens a command window.
 @MainActor
 final class DeepLinkRouter {
     static let shared = DeepLinkRouter()
 
-    private final class WeakModel {
+    private final class Entry {
         weak var model: RepositoryViewModel?
-        init(_ model: RepositoryViewModel) { self.model = model }
+        weak var window: NSWindow?
+        init(model: RepositoryViewModel, window: NSWindow?) {
+            self.model = model
+            self.window = window
+        }
     }
 
-    private var models = [WeakModel]()
+    private var entries = [Entry]()
     private var pending = [URL]()
+    private let launchDate = Date()
+    /// True while GitView only shows command windows it was launched for.
+    private(set) var isCommandOnlySession = false
+    /// Opens a new main window; set by the first main window that appears.
+    var openMainWindow: (() -> Void)?
 
-    func register(_ model: RepositoryViewModel) {
-        models.removeAll { $0.model == nil || $0.model === model }
-        models.append(WeakModel(model))
+    private var isWithinLaunch: Bool {
+        Date().timeIntervalSince(launchDate) < 5
+    }
+
+    func register(_ model: RepositoryViewModel, window: NSWindow?) {
+        entries.removeAll { $0.model == nil || $0.model === model }
+        entries.append(Entry(model: model, window: window))
+
+        if isCommandOnlySession, pending.isEmpty, model.snapshot == nil, let window {
+            // SwiftUI opened its default window while launching for a command; it is not wanted.
+            DispatchQueue.main.async { window.close() }
+            return
+        }
+
+        isCommandOnlySession = false
         let queued = pending
         pending.removeAll()
         queued.forEach { model.handle(deepLink: $0) }
+        if !queued.isEmpty {
+            AppActivation.bringToFront(window)
+        }
     }
 
     func route(_ url: URL) {
-        if let model = models.last(where: { $0.model != nil })?.model {
-            model.handle(deepLink: url)
-        } else {
-            pending.append(url)
+        guard let link = GitViewDeepLink(url: url) else {
+            return
         }
+
+        if link.action == .open {
+            routeToMainWindow(url)
+            return
+        }
+
+        let visibleMain = entries.first { $0.model != nil && $0.window?.isVisible == true }
+        if visibleMain == nil, isWithinLaunch {
+            isCommandOnlySession = true
+        } else if let visibleMain, isWithinLaunch, visibleMain.model?.snapshot == nil {
+            isCommandOnlySession = true
+            visibleMain.window?.close()
+        }
+        CommandWindows.shared.show(link)
+    }
+
+    private func routeToMainWindow(_ url: URL) {
+        isCommandOnlySession = false
+        if let entry = entries.last(where: { $0.model != nil && $0.window?.isVisible == true }), let model = entry.model {
+            model.handle(deepLink: url)
+            AppActivation.bringToFront(entry.window)
+            return
+        }
+
+        pending.append(url)
+        // No visible main window (closed, or not created yet on a cold launch).
+        if openMainWindow != nil, !isWithinLaunch || !entries.isEmpty {
+            openNewMainWindow()
+        } else {
+            // Give SwiftUI a moment to create its launch window; open one if it does not.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self, !self.pending.isEmpty else { return }
+                self.openNewMainWindow()
+            }
+        }
+        NSApp.activate()
+    }
+
+    private func openNewMainWindow() {
+        if let openMainWindow {
+            openMainWindow()
+            return
+        }
+        // No SwiftUI view has appeared yet, so no openWindow action: use File ▸ New Window.
+        guard let mainMenu = NSApp.mainMenu, let (menu, index) = Self.find(title: "New Window", in: mainMenu) else {
+            return
+        }
+        menu.update()
+        menu.performActionForItem(at: index)
+    }
+
+    private static func find(title: String, in menu: NSMenu) -> (NSMenu, Int)? {
+        for (index, item) in menu.items.enumerated() {
+            if item.title == title, item.action != nil {
+                return (menu, index)
+            }
+            if let submenu = item.submenu, let found = find(title: title, in: submenu) {
+                return found
+            }
+        }
+        return nil
     }
 }
 

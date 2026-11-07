@@ -7,6 +7,7 @@ import Shared
 struct ContentView: View {
     @State private var model = RepositoryViewModel()
     @State private var isDropTargeted = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
@@ -28,9 +29,14 @@ struct ContentView: View {
             return true
         } isTargeted: { isDropTargeted = $0 }
         .onAppear {
-            DeepLinkRouter.shared.register(model)
+            let openWindow = openWindow
+            DeepLinkRouter.shared.openMainWindow = { openWindow(id: GitViewApp.mainWindowID) }
         }
-        .background(WindowKeyObserver { DeepLinkRouter.shared.register(model) })
+        .background(WindowKeyObserver { window in DeepLinkRouter.shared.register(model, window: window) })
+        .onReceive(NotificationCenter.default.publisher(for: .gitViewRepositoryDidChange)) { _ in
+            // A command window (commit, pull, …) changed a repository.
+            model.refresh()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // Pick up changes made in an editor or Terminal while GitView was in the background.
             model.refresh()
@@ -54,9 +60,10 @@ struct ContentView: View {
     }
 }
 
-/// Calls `onBecomeKey` whenever this view's window becomes the key window.
+/// Calls `onBecomeKey` when this view is placed in a window and whenever that
+/// window becomes the key window.
 private struct WindowKeyObserver: NSViewRepresentable {
-    let onBecomeKey: () -> Void
+    let onBecomeKey: (NSWindow) -> Void
 
     func makeNSView(context: Context) -> ObserverView {
         let view = ObserverView()
@@ -69,18 +76,21 @@ private struct WindowKeyObserver: NSViewRepresentable {
     }
 
     final class ObserverView: NSView {
-        var onBecomeKey: () -> Void = {}
+        var onBecomeKey: (NSWindow) -> Void = { _ in }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             NotificationCenter.default.removeObserver(self)
             if let window {
                 NotificationCenter.default.addObserver(self, selector: #selector(windowDidBecomeKey), name: NSWindow.didBecomeKeyNotification, object: window)
+                onBecomeKey(window)
             }
         }
 
         @objc private func windowDidBecomeKey() {
-            onBecomeKey()
+            if let window {
+                onBecomeKey(window)
+            }
         }
     }
 }

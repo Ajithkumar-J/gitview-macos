@@ -64,6 +64,8 @@ final class RepositoryViewModel {
     private(set) var canLoadMoreHistory = false
     private var historyHeadOID: String??
     var historyFilter = ""
+    /// Repository-relative paths the history is limited to (Show Log on a file or folder).
+    var historyPaths: [String] = []
     var selectedCommitID: GitCommit.ID? {
         didSet {
             if oldValue != selectedCommitID {
@@ -140,14 +142,14 @@ final class RepositoryViewModel {
             await openRepository(at: url)
             guard snapshot != nil else { return }
             switch action {
-            case .open, .status:
-                section = .changes
             case .log:
                 section = .history
             case .pull:
                 requestPull()
             case .push:
                 requestPush()
+            default:
+                section = .changes
             }
         }
     }
@@ -708,7 +710,7 @@ extension RepositoryViewModel {
 
         do {
             let skip = reset ? 0 : commits.count
-            let page = try await gitService.history(skip: skip, in: snapshot.rootPath)
+            let page = try await gitService.history(skip: skip, paths: historyPaths, in: snapshot.rootPath)
             commits = reset ? page : commits + page
             canLoadMoreHistory = page.count == GitService.historyPageSize
             historyHeadOID = .some(snapshot.headOID)
