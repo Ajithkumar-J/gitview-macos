@@ -71,6 +71,8 @@ SwiftUI views should not execute shell commands directly. Git commands should go
 - `GitViewApp/Commands` — the per-command windows opened from Finder (`CommandSession` + one dialog per command); Git operations for them are in `Shared/GitCommands/GitService+Commands.swift`.
 - `swift test` covers the parsers and a full workflow against a temporary repository.
 
+The app icon lives in `GitView/GitViewApp/Assets.xcassets/AppIcon.appiconset` and is drawn by `swift scripts/generate-app-icon.swift`; edit the script and rerun it to change the icon.
+
 The Xcode project lists source files explicitly. When adding a file, also add it to `GitView.xcodeproj` (Xcode: File → Add Files…).
 
 ## Finder Integration
