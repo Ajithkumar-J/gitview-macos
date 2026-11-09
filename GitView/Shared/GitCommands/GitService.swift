@@ -280,9 +280,14 @@ public final class GitService: Sendable {
 
     public func switchBranch(to branch: GitBranch, in repositoryURL: URL) async throws -> String {
         let arguments: [String]
+        var notes = [String]()
         if branch.isRemote, await localBranchExists(branch.localTrackingName, in: repositoryURL) {
             arguments = ["switch", branch.localTrackingName]
         } else if branch.isRemote {
+            // --track needs the remote's fetch settings to cover the branch.
+            if let remote = branch.remoteName, let note = try await includeInFetch(remote: remote, branch: branch.localTrackingName, in: repositoryURL) {
+                notes.append(note)
+            }
             arguments = ["switch", "--track", branch.name]
         } else {
             arguments = ["switch", branch.name]
@@ -293,7 +298,39 @@ public final class GitService: Sendable {
             throw GitServiceError.commandFailed(result)
         }
 
-        return commandOutput(from: result)
+        return (notes + [commandOutput(from: result)]).joined(separator: "\n\n")
+    }
+
+    /// Repositories set up to fetch only some branches (`remote.<name>.fetch`
+    /// listing single branches) cannot track any other branch: Git refuses with
+    /// "starting point 'origin/x' is not a branch". Adds `branch` to the fetched
+    /// branches, as `git remote set-branches --add` does, when it is not covered.
+    /// Returns a note for the output when the configuration changed.
+    @discardableResult
+    func includeInFetch(remote: String, branch: String, in repositoryURL: URL) async throws -> String? {
+        let result = try await runGit(["config", "--get-all", "remote.\(remote).fetch"], workingDirectory: repositoryURL)
+        let refspecs = result.success ? result.standardOutput.split(whereSeparator: \.isNewline).map(String.init) : []
+        guard !Self.refspecs(refspecs, cover: "refs/heads/\(branch)") else {
+            return nil
+        }
+        try await runChecked(["remote", "set-branches", "--add", remote, branch], in: repositoryURL)
+        return "Added \(remote)/\(branch) to the branches this repository fetches (git remote set-branches --add \(remote) \(branch))."
+    }
+
+    /// True when one of the fetch refspecs maps `ref` (for example refs/heads/main).
+    static func refspecs(_ refspecs: [String], cover ref: String) -> Bool {
+        refspecs.contains { spec in
+            var spec = spec.trimmingCharacters(in: .whitespaces)
+            if spec.hasPrefix("^") { return false }
+            if spec.hasPrefix("+") { spec.removeFirst() }
+            let source = String(spec.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+            guard let star = source.firstIndex(of: "*") else {
+                return source == ref
+            }
+            let prefix = source[..<star]
+            let suffix = source[source.index(after: star)...]
+            return ref.count >= prefix.count + suffix.count && ref.hasPrefix(prefix) && ref.hasSuffix(suffix)
+        }
     }
 
     private func localBranchExists(_ branchName: String, in repositoryURL: URL) async -> Bool {
@@ -308,6 +345,7 @@ public final class GitService: Sendable {
         }
 
         let remoteBranchName = branch.localTrackingName
+        let note = try await includeInFetch(remote: remote, branch: remoteBranchName, in: repositoryURL)
         let result = try await runGit(
             ["fetch", remote, "\(remoteBranchName):refs/remotes/\(remote)/\(remoteBranchName)"],
             workingDirectory: repositoryURL
@@ -316,7 +354,7 @@ public final class GitService: Sendable {
             throw GitServiceError.commandFailed(result)
         }
 
-        return commandOutput(from: result)
+        return ([note].compactMap { $0 } + [commandOutput(from: result)]).joined(separator: "\n\n")
     }
 
     // MARK: - Diffs

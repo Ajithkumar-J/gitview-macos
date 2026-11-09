@@ -281,5 +281,51 @@ final class GitServiceCommandTests: XCTestCase {
         let current = try await service.currentBranch(in: repository)
         XCTAssertEqual(current, "Release_13_hotfix")
     }
+
+    /// Regression: switching to a server branch in a repository that fetches only
+    /// some branches failed with "starting point 'origin/x' is not a branch".
+    func testSwitchToServerBranchWithNarrowFetchSettings() async throws {
+        try write("base\n", to: "file.txt")
+        _ = try await service.commit(message: "Base", files: try await files(), in: repository)
+        let remote = sandbox.appendingPathComponent("remote.git")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try await git("init", "--bare", "-q", in: remote)
+        try await git("remote", "add", "origin", remote.path)
+        try await git("push", "-q", "origin", "HEAD:refs/heads/development", "HEAD:refs/heads/release/boldbi_v17.2", "HEAD:refs/heads/release/boldbi_v17.1")
+        try await git("config", "--replace-all", "remote.origin.fetch", "+refs/heads/development:refs/remotes/origin/development")
+        try await git("fetch", "-q", "origin")
+
+        // Search the way users type it.
+        for query in ["boldbi_v17.2", "v17_2", "release_boldbi 17.2", "BOLDBI V17.2"] {
+            let found = try await RemoteBranchDirectory().search(query, remote: "origin", in: repository, service: service)
+            XCTAssertEqual(found.first?.name, "origin/release/boldbi_v17.2", query)
+        }
+        XCTAssertTrue(BranchSearch.matches("release/boldbi_v17.2", query: "_"))
+        XCTAssertFalse(BranchSearch.matches("release/v17.2", query: "_"))
+        let ranked = BranchSearch.ranked(["release/boldbi_v17.2", "boldbi/release_x"], for: "boldbi_v17")
+        XCTAssertEqual(ranked.first, "release/boldbi_v17.2")
+
+        // Fetch + switch from the search result, as the app does.
+        let matches = try await service.searchRemoteBranches(matching: "boldbi_v17.2", in: repository)
+        let target = try XCTUnwrap(matches.first)
+        _ = try await service.fetchRemoteBranch(target, in: repository)
+        let output = try await service.switchBranch(to: target, in: repository)
+        let current = try await service.currentBranch(in: repository)
+        XCTAssertEqual(current, "release/boldbi_v17.2")
+        let upstream = try await service.currentUpstreamBranch(in: repository)
+        XCTAssertEqual(upstream, "origin/release/boldbi_v17.2", output)
+        let refspecs = try await git("config", "--get-all", "remote.origin.fetch")
+        XCTAssertTrue(refspecs.contains("refs/heads/release/boldbi_v17.2:refs/remotes/origin/release/boldbi_v17.2"))
+        XCTAssertTrue(refspecs.contains("refs/heads/development:"), "Existing fetch settings are kept")
+
+        // A branch fetched earlier by name (so not "unfetched") but not covered also works.
+        try await git("fetch", "-q", "origin", "release/boldbi_v17.1:refs/remotes/origin/release/boldbi_v17.1")
+        _ = try await service.switchBranch(to: GitBranch(name: "origin/release/boldbi_v17.1", isCurrent: false, isRemote: true), in: repository)
+        let second = try await service.currentUpstreamBranch(in: repository)
+        XCTAssertEqual(second, "origin/release/boldbi_v17.1")
+
+        XCTAssertTrue(GitService.refspecs(["+refs/heads/*:refs/remotes/origin/*"], cover: "refs/heads/a/b"))
+        XCTAssertFalse(GitService.refspecs(["+refs/heads/main:refs/remotes/origin/main"], cover: "refs/heads/a"))
+    }
 }
 

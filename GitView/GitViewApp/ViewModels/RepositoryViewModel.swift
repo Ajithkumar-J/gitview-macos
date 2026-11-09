@@ -828,7 +828,7 @@ extension RepositoryViewModel {
     private func scheduleRemoteSearch() {
         remoteSearchTask?.cancel()
         let query = branchFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query.count >= 2, remoteName != nil else {
+        guard !query.isEmpty, remoteName != nil else {
             remoteSearchResults = []
             return
         }
@@ -879,13 +879,14 @@ extension RepositoryViewModel {
         guard !branch.isCurrent else { return }
         let title = branch.isRemote ? "Checking out \(branch.localTrackingName)…" : "Switching to \(branch.name)…"
         perform(title, failureTitle: "Unable to Switch Branch", success: "Switched to \(branch.localTrackingName)") { [weak self] service, root in
+            var fetched = ""
             if branch.isUnfetched {
-                _ = try await service.fetchRemoteBranch(branch, in: root)
+                fetched = try await service.fetchRemoteBranch(branch, in: root)
             }
             let output = try await service.switchBranch(to: branch, in: root)
             self?.selectedChangeID = nil
             self?.remoteSearchResults = []
-            return output
+            return [fetched, output].filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
     }
 }

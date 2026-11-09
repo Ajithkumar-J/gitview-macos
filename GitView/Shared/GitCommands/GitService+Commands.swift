@@ -320,21 +320,37 @@ public extension GitService {
 // MARK: - Branch search
 
 /// How GitView matches typed text against branch names everywhere: every word
-/// must appear somewhere in the name, ignoring case and order. "release 13"
-/// matches "Fetch-from-release-tag13" and "Release_13_hotfix".
+/// must appear somewhere in the name, ignoring case and order. Spaces, `_`, `-`,
+/// `/` and `.` all separate words, so "release 13", "release_13" and "17_2"
+/// match "Fetch-from-release-tag13", "release/13" and "boldbi_v17.2".
 public enum BranchSearch {
     public static let resultLimit = 300
+    private static let separators = CharacterSet(charactersIn: "_-/.").union(.whitespacesAndNewlines)
 
     public static func matches(_ name: String, query: String) -> Bool {
-        let words = query.split(whereSeparator: \.isWhitespace)
+        let words = query.components(separatedBy: separators).filter { !$0.isEmpty }
+        guard !words.isEmpty else {
+            // Only separators typed, such as "_": match them literally.
+            let literal = query.trimmingCharacters(in: .whitespaces)
+            return literal.isEmpty || name.contains(literal)
+        }
         return words.allSatisfy { name.localizedCaseInsensitiveContains($0) }
+    }
+
+    /// Names containing the query exactly as typed come first, then by name.
+    public static func ranked(_ names: [String], for query: String) -> [String] {
+        let typed = query.trimmingCharacters(in: .whitespaces)
+        return names.sorted { first, second in
+            let firstExact = first.localizedCaseInsensitiveContains(typed)
+            let secondExact = second.localizedCaseInsensitiveContains(typed)
+            if firstExact != secondExact { return firstExact }
+            return first.localizedStandardCompare(second) == .orderedAscending
+        }
     }
 
     /// Server branch names that match, as `remote/name` branches marked unfetched.
     public static func unfetchedBranches(_ names: [String], matching query: String, remote: String, limit: Int = resultLimit) -> [GitBranch] {
-        names
-            .filter { matches($0, query: query) }
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        ranked(names.filter { matches($0, query: query) }, for: query)
             .prefix(limit)
             .map { GitBranch(name: "\(remote)/\($0)", isCurrent: false, isRemote: true, isUnfetched: true) }
     }
