@@ -192,7 +192,7 @@ struct SwitchBranchDialog: View {
     /// Searches the server's branches as you type (the list is fetched once and cached).
     private func searchServer() async {
         let query = filter.trimmingCharacters(in: .whitespaces)
-        guard query.count >= 2, let service = session.service, let root = session.root,
+        guard !query.isEmpty, let service = session.service, let root = session.root,
               let remote = session.snapshot?.defaultRemote else {
             serverMatches = []
             return
@@ -212,14 +212,25 @@ struct SwitchBranchDialog: View {
         let name = newName.trimmingCharacters(in: .whitespaces)
         let target = createNew ? name : selected.isRemote ? selected.localTrackingName : selected.name
         Task {
-            await session.run("Switching to \(target)…", success: "Switched to \(target)") {
+            await session.run(
+                "Switching to \(target)…",
+                success: "Switched to \(target)",
+                followUps: [
+                    // The natural next step after switching: get the branch's latest commits.
+                    CommandFollowUp(title: "Pull…", systemImage: "arrow.down.circle") {
+                        session.openCommand(.pull, paths: [root.path])
+                        session.close()
+                    },
+                ]
+            ) {
+                var fetched = ""
                 if selected.isUnfetched {
-                    _ = try await service.fetchRemoteBranch(selected, in: root)
+                    fetched = try await service.fetchRemoteBranch(selected, in: root)
                 }
-                if createNew {
-                    return try await service.createBranch(named: name, from: selected.name, switchToBranch: true, in: root)
-                }
-                return try await service.switchBranch(to: selected, in: root)
+                let output = createNew
+                    ? try await service.createBranch(named: name, from: selected.name, switchToBranch: true, in: root)
+                    : try await service.switchBranch(to: selected, in: root)
+                return [fetched, output].filter { !$0.isEmpty }.joined(separator: "\n\n")
             }
         }
     }
