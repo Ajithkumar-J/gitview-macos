@@ -86,7 +86,12 @@ final class RepositoryViewModel {
     // MARK: Branches
 
     private(set) var branches: [GitBranch] = []
-    var branchFilter = ""
+    var branchFilter = "" {
+        didSet {
+            if branchFilter != oldValue { scheduleRemoteSearch() }
+        }
+    }
+    private var remoteSearchTask: Task<Void, Never>?
     private(set) var remoteSearchResults: [GitBranch] = []
     private(set) var isSearchingRemote = false
     var selectedBranchID: GitBranch.ID?
@@ -315,7 +320,10 @@ final class RepositoryViewModel {
     }
 
     private func postError(title: String, _ error: Error) {
-        let message = error.localizedDescription
+        let output = error.localizedDescription
+        let message = [(error as? LocalizedError)?.recoverySuggestion, output]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
         log(title: title, text: message, isError: true)
         statusMessage = StatusMessage(text: title, kind: .error)
         alert = AlertContent(title: title, message: message)
@@ -353,8 +361,12 @@ final class RepositoryViewModel {
         snapshot?.stagedCount ?? 0
     }
 
+    /// False when Git has no user.name / user.email; the commit panel asks for them.
+    var hasGitIdentity = true
+
     var canCommit: Bool {
-        stagedCount > 0
+        hasGitIdentity
+            && stagedCount > 0
             && !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !(snapshot?.hasConflicts ?? false)
             && !isBusy
@@ -362,6 +374,7 @@ final class RepositoryViewModel {
 
     var commitDisabledReason: String? {
         guard let snapshot else { return nil }
+        if !hasGitIdentity { return "Enter your name and email first." }
         if snapshot.hasConflicts { return "Resolve merge conflicts before committing." }
         if stagedCount == 0 { return snapshot.files.isEmpty ? "No changes to commit." : "Stage files to include them in the commit." }
         if commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a commit message." }
@@ -797,7 +810,7 @@ extension RepositoryViewModel {
     private func filteredBranches(_ list: [GitBranch]) -> [GitBranch] {
         let query = branchFilter.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else { return list }
-        return list.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        return list.filter { BranchSearch.matches($0.name, query: query) }
     }
 
     fileprivate func loadBranches() async {
@@ -810,24 +823,54 @@ extension RepositoryViewModel {
         }
     }
 
-    func searchRemoteBranches() {
+    /// Searches the server as you type (after a short pause), using the cached
+    /// branch list so only the first search contacts the server.
+    private func scheduleRemoteSearch() {
+        remoteSearchTask?.cancel()
         let query = branchFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2, remoteName != nil else {
+            remoteSearchResults = []
+            return
+        }
+        remoteSearchTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await self?.runRemoteSearch(query, refresh: false, announce: false)
+        }
+    }
+
+    /// Enter or the globe button: list the server's branches again, then search.
+    func searchRemoteBranches() {
+        remoteSearchTask?.cancel()
+        let query = branchFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        remoteSearchTask = Task { [weak self] in
+            await self?.runRemoteSearch(query, refresh: true, announce: true)
+        }
+    }
+
+    private func runRemoteSearch(_ query: String, refresh: Bool, announce: Bool) async {
         guard let gitService, let root = snapshot?.rootPath, let remote = remoteName, !query.isEmpty else {
             return
         }
-
         isSearchingRemote = true
-        Task {
-            defer { isSearchingRemote = false }
-            do {
-                remoteSearchResults = try await gitService.searchRemoteBranches(matching: query, remote: remote, in: root)
+        defer { isSearchingRemote = false }
+        do {
+            let results = try await RemoteBranchDirectory.shared.search(query, remote: remote, in: root, service: gitService, refresh: refresh)
+            // Ignore results for text the user has since changed.
+            guard query == branchFilter.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            remoteSearchResults = results
+            if announce {
                 let newCount = unfetchedRemoteBranches.count
                 statusMessage = StatusMessage(
                     text: newCount == 0 ? "No other branches on \(remote) match “\(query)”." : "Found \(newCount) unfetched branch\(newCount == 1 ? "" : "es") on \(remote).",
                     kind: .info
                 )
-            } catch {
+            }
+        } catch {
+            if announce {
                 postError(title: "Remote Search Failed", error)
+            } else {
+                log(title: "Remote Branch Search Failed", text: error.localizedDescription, isError: true)
             }
         }
     }

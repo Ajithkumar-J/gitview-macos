@@ -9,6 +9,16 @@ struct CommitPanelView: View {
     @FocusState private var isMessageFocused: Bool
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            IdentitySetupView(service: model.gitService, repositoryURL: snapshot.rootPath, isConfigured: $model.hasGitIdentity,
+                              padding: EdgeInsets(top: 0, leading: 0, bottom: 8, trailing: 0))
+            panel
+        }
+        .padding(12)
+        .background(.bar)
+    }
+
+    private var panel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
                 Image(systemName: "arrow.triangle.branch")
@@ -70,7 +80,5 @@ struct CommitPanelView: View {
                 .help("Commit staged changes (⌘↩)")
             }
         }
-        .padding(12)
-        .background(.bar)
     }
 }

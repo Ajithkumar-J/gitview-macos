@@ -11,13 +11,26 @@ struct SuggestionField: View {
     @Binding var text: String
     let suggestions: [String]
 
+    /// Names containing the typed words (all names while the field is empty or
+    /// already holds a full name), so long lists stay usable.
+    private var shown: [String] {
+        let query = text.trimmingCharacters(in: .whitespaces)
+        let matching = query.isEmpty || suggestions.contains(query)
+            ? suggestions
+            : suggestions.filter { BranchSearch.matches($0, query: query) }
+        return Array(matching.prefix(100))
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             TextField(placeholder, text: $text)
                 .textFieldStyle(.roundedBorder)
             Menu {
-                ForEach(suggestions, id: \.self) { name in
+                ForEach(shown, id: \.self) { name in
                     Button(name) { text = name }
+                }
+                if shown.isEmpty {
+                    Text("No branches contain “\(text)”")
                 }
             } label: {
                 Image(systemName: "chevron.down")
@@ -127,8 +140,26 @@ final class BranchCatalog {
         remote = branches.filter(\.isRemote)
     }
 
+    /// Branch names on the server, including ones not fetched yet, per remote.
+    private(set) var serverNames: [String: [String]] = [:]
+
+    /// Fetched branches first, then the rest of the server's branches.
     func remoteBranchNames(on remoteName: String) -> [String] {
-        remote.filter { $0.remoteName == remoteName }.map(\.localTrackingName)
+        let fetched = remote.filter { $0.remoteName == remoteName }.map(\.localTrackingName)
+        let known = Set(fetched)
+        let others = (serverNames[remoteName] ?? [])
+            .filter { !known.contains($0) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        return fetched + others
+    }
+
+    /// Lists the server's branches (cached), for suggestions; failures are ignored.
+    func loadServerBranches(_ session: CommandSession, remote remoteName: String) async {
+        guard !remoteName.isEmpty, serverNames[remoteName] == nil, let service = session.service, let root = session.root,
+              let names = try? await RemoteBranchDirectory.shared.branchNames(remote: remoteName, in: root, service: service) else {
+            return
+        }
+        serverNames[remoteName] = names
     }
 }
 
@@ -244,6 +275,7 @@ struct PullDialog: View {
             }
             await catalog.load(session)
             await loadPreview()
+            await catalog.loadServerBranches(session, remote: remote)
         }
     }
 
@@ -456,6 +488,7 @@ struct PushDialog: View {
             localBranch = snapshot.isDetachedHead ? (catalog.local.first?.name ?? "") : snapshot.branch
             applyDefaults(for: localBranch)
             await loadOutgoing()
+            await catalog.loadServerBranches(session, remote: remote)
         }
         .onChange(of: localBranch) { old, new in
             if !old.isEmpty { applyDefaults(for: new) }

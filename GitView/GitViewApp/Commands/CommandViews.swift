@@ -143,6 +143,23 @@ struct CommandResultView: View {
             }
             .padding(20)
 
+            if let hint = result.hint {
+                Label {
+                    Text(hint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                } icon: {
+                    Image(systemName: "lightbulb.fill")
+                        .foregroundStyle(.yellow)
+                }
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(.yellow.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+            }
+
             Divider()
 
             ScrollView {
@@ -387,6 +404,94 @@ final class FileDiffLoader {
                 guard !Task.isCancelled else { return }
                 state = .failed(error.localizedDescription)
             }
+        }
+    }
+}
+
+// MARK: - Identity
+
+/// Asks for a name and email when Git has none, so commits are not recorded
+/// under an automatic identity such as "you@Mac.local".
+struct IdentitySetupView: View {
+    let service: GitService?
+    let repositoryURL: URL?
+    @Binding var isConfigured: Bool
+    /// Space around the banner, applied only while it is shown.
+    var padding = EdgeInsets()
+
+    @State private var hasLoaded = false
+    @State private var name = ""
+    @State private var email = ""
+    @State private var errorText: String?
+    @State private var isSaving = false
+
+    private var candidate: GitIdentity {
+        GitIdentity(name: name, email: email)
+    }
+
+    var body: some View {
+        // A container that always exists, so the check runs even while nothing is shown.
+        VStack(spacing: 0) {
+            if hasLoaded, !isConfigured {
+                form.padding(padding)
+            }
+        }
+        .task(id: repositoryURL) { await load() }
+    }
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Tell Git who you are", systemImage: "person.crop.circle.badge.exclamationmark")
+                .font(.headline)
+            Text("Every commit records a name and email. Use the email of your GitHub, GitLab or Azure DevOps account so your commits are linked to you. This is saved for all repositories.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                TextField("Full name", text: $name)
+                TextField("Email address", text: $email)
+                Button("Save", action: save)
+                    .disabled(!candidate.isComplete || isSaving)
+            }
+            .textFieldStyle(.roundedBorder)
+            .onSubmit(save)
+            if let errorText {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(12)
+        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.orange.opacity(0.35)))
+    }
+
+    private func load() async {
+        guard let service else { return }
+        let identity = await service.identity(in: repositoryURL)
+        isConfigured = identity.isComplete
+        if name.isEmpty {
+            name = identity.name.isEmpty ? NSFullUserName() : identity.name
+        }
+        if email.isEmpty {
+            email = identity.email
+        }
+        hasLoaded = true
+    }
+
+    private func save() {
+        guard let service, candidate.isComplete, !isSaving else { return }
+        isSaving = true
+        Task {
+            do {
+                try await service.saveIdentity(candidate)
+                // A repository-level setting can still override the global one.
+                isConfigured = await service.identity(in: repositoryURL).isComplete
+                errorText = isConfigured ? nil : "This repository's own Git settings override the name or email. Run git config --unset user.email in it."
+            } catch {
+                errorText = error.localizedDescription
+            }
+            isSaving = false
         }
     }
 }

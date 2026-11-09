@@ -18,6 +18,7 @@ struct CommitDialog: View {
     @State private var selection: GitFileStatus.ID?
     @State private var didInitialize = false
     @State private var diff = FileDiffLoader()
+    @State private var hasIdentity = true
     @FocusState private var isMessageFocused: Bool
 
     private var files: [GitFileStatus] {
@@ -33,6 +34,9 @@ struct CommitDialog: View {
     }
 
     private var disabledReason: String? {
+        if !hasIdentity {
+            return "Enter your name and email first."
+        }
         if message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Enter a commit message."
         }
@@ -46,6 +50,9 @@ struct CommitDialog: View {
         VStack(spacing: 0) {
             DialogHeader(session: session)
             Divider()
+
+            IdentitySetupView(service: session.service, repositoryURL: session.root, isConfigured: $hasIdentity,
+                              padding: EdgeInsets(top: 14, leading: 14, bottom: 0, trailing: 14))
 
             VSplitView {
                 messageEditor

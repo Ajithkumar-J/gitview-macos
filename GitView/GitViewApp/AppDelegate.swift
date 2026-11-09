@@ -199,3 +199,98 @@ final class FinderServiceProvider: NSObject {
         NSWorkspace.shared.open(deepLinkURL)
     }
 }
+
+/// `GitView --askpass "<question>"`: the sign-in dialog Git and SSH show through
+/// GIT_ASKPASS / SSH_ASKPASS. Runs as a short-lived process with no Dock icon,
+/// prints the answer on standard output and exits (status 1 when cancelled).
+@MainActor
+enum AskPassPrompt {
+    nonisolated static func runIfRequested() {
+        let arguments = CommandLine.arguments
+        guard arguments.count >= 2, arguments[1] == "--askpass" else {
+            return
+        }
+        let question = arguments.count > 2 ? arguments[2] : ""
+        let answer = MainActor.assumeIsolated { ask(question) }
+        guard let answer else {
+            exit(1)
+        }
+        FileHandle.standardOutput.write(Data((answer + "\n").utf8))
+        exit(0)
+    }
+
+    private static func ask(_ question: String) -> String? {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = Self.host(in: prompt)
+        let alert = NSAlert()
+
+        if prompt.contains("(yes/no") {
+            alert.alertStyle = .warning
+            alert.messageText = "Trust \(host ?? "this server")?"
+            alert.informativeText = prompt + "\n\nChoose Connect only if you expected to connect to this server."
+            alert.addButton(withTitle: "Connect")
+            alert.addButton(withTitle: "Cancel")
+            return show(alert) ? "yes" : nil
+        }
+
+        let lowercased = prompt.lowercased()
+        let isPassphrase = lowercased.contains("passphrase")
+        let isSecret = isPassphrase || lowercased.contains("password") || prompt.contains("PIN")
+        let field: NSTextField = isSecret ? NSSecureTextField() : NSTextField()
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+
+        if isPassphrase {
+            alert.messageText = "Unlock SSH Key"
+            alert.informativeText = prompt
+            field.placeholderString = "Passphrase"
+        } else if lowercased.hasPrefix("username") {
+            alert.messageText = "Sign in to \(host ?? "the Git server")"
+            alert.informativeText = "Enter your user name for \(host ?? "this server")."
+            field.placeholderString = "User name"
+        } else if lowercased.hasPrefix("password") {
+            alert.messageText = "Sign in to \(host ?? "the Git server")"
+            alert.informativeText = "Paste a personal access token (or app password). GitHub, GitLab, Azure DevOps and Bitbucket don't accept your account password here. It is saved in your Keychain."
+            field.placeholderString = "Personal access token"
+        } else {
+            alert.messageText = "Git Needs Information"
+            alert.informativeText = prompt
+        }
+        alert.accessoryView = field
+        alert.addButton(withTitle: isSecret && !isPassphrase ? "Sign In" : "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        return show(alert) ? field.stringValue : nil
+    }
+
+    private static func show(_ alert: NSAlert) -> Bool {
+        alert.layout()
+        AppActivation.bringToFront(alert.window)
+        alert.window.level = .floating
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// "github.com" from prompts like "Password for 'https://me@github.com': ".
+    static func host(in prompt: String) -> String? {
+        guard let quoteStart = prompt.firstIndex(of: "'") else { return nil }
+        let rest = prompt[prompt.index(after: quoteStart)...]
+        guard let quoteEnd = rest.firstIndex(of: "'") else { return nil }
+        var target = String(rest[..<quoteEnd])
+        if let scheme = target.range(of: "://") {
+            target = String(target[scheme.upperBound...])
+        } else if target.contains("/") {
+            return nil   // a file path (SSH key), not a server
+        }
+        if let at = target.lastIndex(of: "@") {
+            target = String(target[target.index(after: at)...])
+        }
+        target = String(target.prefix { $0 != "/" && $0 != ":" })
+        if let space = target.firstIndex(of: " ") {
+            target = String(target[..<space])
+        }
+        return target.isEmpty ? nil : target
+    }
+}
+

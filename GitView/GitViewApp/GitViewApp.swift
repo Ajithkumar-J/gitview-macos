@@ -4,6 +4,14 @@ import Shared
 #endif
 
 @main
+enum GitViewMain {
+    static func main() {
+        // Started by Git or SSH to ask a sign-in question: answer and exit.
+        AskPassPrompt.runIfRequested()
+        GitViewApp.main()
+    }
+}
+
 struct GitViewApp: App {
     static let mainWindowID = "main"
 

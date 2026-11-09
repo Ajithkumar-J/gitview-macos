@@ -9,6 +9,7 @@ public enum GitServiceError: LocalizedError, Equatable {
     case emptyPullSource
     case noRemoteConfigured
     case detachedHeadRemoteOperation
+    case identityNotConfigured
     case commandFailed(GitCommandResult)
 
     public var errorDescription: String? {
@@ -29,8 +30,22 @@ public enum GitServiceError: LocalizedError, Equatable {
             "This repository has no remote configured."
         case .detachedHeadRemoteOperation:
             "Pull and push are unavailable while the repository is in detached HEAD state."
+        case .identityNotConfigured:
+            "Git doesn't know your name and email address yet."
         case .commandFailed(let result):
             Self.message(for: result)
+        }
+    }
+
+    /// Plain-language advice for common failures, shown next to Git's own output.
+    public var recoverySuggestion: String? {
+        switch self {
+        case .identityNotConfigured:
+            GitFailureHint.identity
+        case .commandFailed(let result):
+            GitFailureHint.suggestion(for: result.standardError + "\n" + result.standardOutput)
+        default:
+            nil
         }
     }
 
@@ -39,6 +54,47 @@ public enum GitServiceError: LocalizedError, Equatable {
         let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = [error, output].filter { !$0.isEmpty }.joined(separator: "\n\n")
         return text.isEmpty ? "Git exited with code \(result.exitCode)." : text
+    }
+}
+
+/// Recognises sign-in, SSH, network and identity failures in Git's output.
+public enum GitFailureHint {
+    static let identity = "Enter your name and email in the commit window, or run in Terminal:\ngit config --global user.name \"Your Name\"\ngit config --global user.email you@example.com"
+
+    public static func suggestion(for output: String) -> String? {
+        let text = output.lowercased()
+        func has(_ needles: String...) -> Bool { needles.contains { text.contains($0) } }
+
+        if has("author identity unknown", "unable to auto-detect email", "empty ident name") {
+            return identity
+        }
+        if has("could not read username", "could not read password", "terminal prompts disabled",
+               "authentication failed", "invalid username or password", "invalid credentials",
+               "password authentication was removed", "returned error: 401", "http basic: access denied") {
+            return "Sign-in was cancelled or the server rejected it. Run the command again and sign in when GitView asks. "
+                + "GitHub, GitLab, Azure DevOps and Bitbucket need a personal access token (or app password) "
+                + "in the password field, not your account password. A rejected password is removed from the Keychain, so you will be asked again."
+        }
+        if has("permission denied (publickey") {
+            return "The server did not accept your SSH key. Add your public key (for example ~/.ssh/id_ed25519.pub) "
+                + "to your account's SSH settings, or switch the remote to its HTTPS URL and sign in with a token."
+        }
+        if has("host key verification failed") {
+            return "The server's identity was not confirmed. Run the command again and choose Connect when GitView asks "
+                + "whether to trust the server."
+        }
+        if has("returned error: 403", "permission to", "access denied", "you don't have permission") {
+            return "You are signed in, but this account does not have access. Check that you have write access to the "
+                + "repository, or that your token has the repo / write scope."
+        }
+        if has("repository not found", "does not appear to be a git repository", "not found\nfatal") {
+            return "The repository was not found, or your account cannot see it. Check the URL and that you signed in "
+                + "with an account that has access."
+        }
+        if has("could not resolve host", "failed to connect", "network is unreachable", "operation timed out", "connection timed out") {
+            return "GitView could not reach the server. Check your network or VPN connection and try again."
+        }
+        return nil
     }
 }
 
@@ -196,27 +252,29 @@ public final class GitService: Sendable {
         return GitLogParser.parseBranches(result.standardOutput)
     }
 
-    /// Asks the remote server for branch names, including ones not fetched yet.
+    /// Branches on the server whose names contain every word of `query`
+    /// (ignoring case), including ones that are not fetched yet.
     public func searchRemoteBranches(matching query: String, remote: String = "origin", in repositoryURL: URL) async throws -> [GitBranch] {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return []
         }
+        let names = try await remoteBranchNames(remote: remote, in: repositoryURL)
+        return BranchSearch.unfetchedBranches(names, matching: query, remote: remote)
+    }
 
-        let result = try await runGit(["ls-remote", "--heads", remote, "*\(trimmedQuery)*"], workingDirectory: repositoryURL)
+    /// Every branch name on `remote` (`git ls-remote --heads`), without the `refs/heads/` prefix.
+    public func remoteBranchNames(remote: String, in repositoryURL: URL) async throws -> [String] {
+        let result = try await runGit(["ls-remote", "--heads", remote], workingDirectory: repositoryURL)
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
-
         return result.standardOutput
             .split(whereSeparator: \.isNewline)
             .compactMap { line in
-                guard let ref = line.split(separator: "\t").last else {
+                guard let ref = line.split(separator: "\t").last, ref.hasPrefix("refs/heads/") else {
                     return nil
                 }
-
-                let branchName = ref.replacingOccurrences(of: "refs/heads/", with: "")
-                return GitBranch(name: "\(remote)/\(branchName)", isCurrent: false, isRemote: true, isUnfetched: true)
+                return String(ref.dropFirst("refs/heads/".count))
             }
     }
 
@@ -350,6 +408,9 @@ public final class GitService: Sendable {
         let staged = try await status(in: repositoryURL).filter(\.hasStagedChanges)
         guard !staged.isEmpty else {
             throw GitServiceError.nothingStaged
+        }
+        guard await identity(in: repositoryURL).isComplete else {
+            throw GitServiceError.identityNotConfigured
         }
 
         let commitResult = try await runGit(["commit", "-m", trimmedMessage], workingDirectory: repositoryURL)
