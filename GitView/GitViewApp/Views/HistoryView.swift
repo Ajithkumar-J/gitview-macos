@@ -76,7 +76,7 @@ struct CommitRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(commit.subject.isEmpty ? "(no message)" : commit.subject)
+            Text(commit.subject.isEmpty ? "(no message)" : DisplayText.visible(commit.subject, keepNewlines: false))
                 .fontWeight(.medium)
                 .lineLimit(2)
 
@@ -84,7 +84,7 @@ struct CommitRow: View {
                 Text(commit.shortHash)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
-                Text(commit.authorName)
+                Text(DisplayText.visible(commit.authorName, keepNewlines: false))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -196,13 +196,13 @@ struct CommitHeaderView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Text(detail.commit.subject)
+                Text(DisplayText.visible(detail.commit.subject, keepNewlines: false))
                     .font(.title3.weight(.semibold))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 if !detail.body.isEmpty {
-                    Text(detail.body)
+                    Text(DisplayText.visible(detail.body))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -240,7 +240,7 @@ struct CommitHeaderView: View {
                     if detail.committerName != detail.commit.authorName {
                         GridRow {
                             label("Committer")
-                            Text(detail.committerName)
+                            Text(DisplayText.visible(detail.committerName, keepNewlines: false))
                         }
                     }
                     if !detail.commit.parentHashes.isEmpty {

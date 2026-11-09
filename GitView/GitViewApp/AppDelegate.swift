@@ -200,17 +200,19 @@ final class FinderServiceProvider: NSObject {
     }
 }
 
-/// `GitView --askpass "<question>"`: the sign-in dialog Git and SSH show through
-/// GIT_ASKPASS / SSH_ASKPASS. Runs as a short-lived process with no Dock icon,
-/// prints the answer on standard output and exits (status 1 when cancelled).
+/// The sign-in dialog Git and SSH show through GIT_ASKPASS / SSH_ASKPASS: they
+/// run GitView's binary with the question as its only argument, and GitView sets
+/// GITVIEW_ASKPASS=1 for the Git processes it starts. Runs as a short-lived
+/// process with no Dock icon, prints the answer on standard output and exits
+/// (status 1 when cancelled). The answer is never logged or stored.
 @MainActor
 enum AskPassPrompt {
     nonisolated static func runIfRequested() {
         let arguments = CommandLine.arguments
-        guard arguments.count >= 2, arguments[1] == "--askpass" else {
+        guard ProcessInfo.processInfo.environment["GITVIEW_ASKPASS"] == "1", arguments.count == 2 else {
             return
         }
-        let question = arguments.count > 2 ? arguments[2] : ""
+        let question = arguments[1]
         let answer = MainActor.assumeIsolated { ask(question) }
         guard let answer else {
             exit(1)
@@ -233,6 +235,9 @@ enum AskPassPrompt {
             alert.informativeText = prompt + "\n\nChoose Connect only if you expected to connect to this server."
             alert.addButton(withTitle: "Connect")
             alert.addButton(withTitle: "Cancel")
+            // Return must not trust a server by reflex: make Cancel the default button.
+            alert.buttons[0].keyEquivalent = ""
+            alert.buttons[1].keyEquivalent = "\r"
             return show(alert) ? "yes" : nil
         }
 
@@ -291,6 +296,39 @@ enum AskPassPrompt {
             target = String(target[..<space])
         }
         return target.isEmpty ? nil : target
+    }
+}
+
+/// Asks before GitView runs Git in a repository whose own settings or hooks
+/// would run programs (see `RepositorySafety`). "Don't Open" is the default.
+enum RepositoryTrustPrompt {
+    @Sendable static func confirm(_ report: RepositorySafetyReport) async -> Bool {
+        await MainActor.run { ask(report) }
+    }
+
+    @MainActor
+    private static func ask(_ report: RepositorySafetyReport) -> Bool {
+        let shown = report.risks.prefix(10).map { risk -> String in
+            let value = DisplayText.visible(String(risk.value.prefix(160)), keepNewlines: false)
+            let place = risk.location == "this repository" ? "" : " (\(DisplayText.visible(risk.location, keepNewlines: false)))"
+            return "• \(risk.setting)\(place) = \(value)\n   \(risk.effect)"
+        }
+        let more = report.risks.count > 10 ? "\n…and \(report.risks.count - 10) more." : ""
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Trust “\(DisplayText.visible(report.root.lastPathComponent, keepNewlines: false))”?"
+        alert.informativeText = """
+        This repository's own settings make Git run programs on your Mac:
+
+        \(shown.joined(separator: "\n"))\(more)
+
+        A repository from someone else can use this to run harmful code. Open it only if you know where it came from. GitView asks again if these settings change.
+        """
+        alert.addButton(withTitle: "Don't Open")
+        alert.addButton(withTitle: "Trust and Open")
+        AppActivation.bringToFront(nil)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 }
 

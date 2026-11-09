@@ -170,7 +170,7 @@ struct SwitchBranchDialog: View {
             Image(systemName: branch.isRemote ? "network" : "arrow.triangle.branch")
                 .foregroundStyle(.secondary)
                 .frame(width: 16)
-            Text(branch.name)
+            Text(DisplayText.visible(branch.name, keepNewlines: false))
                 .fontWeight(branch.isCurrent ? .semibold : .regular)
             if branch.isCurrent {
                 Text("current")
@@ -419,7 +419,7 @@ struct StashListDialog: View {
             } else if let stashes {
                 List(stashes, selection: $selection) { stash in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(stash.message)
+                        Text(DisplayText.visible(stash.message, keepNewlines: false))
                             .lineLimit(2)
                         HStack(spacing: 6) {
                             Text(stash.ref).font(.caption.monospaced())
@@ -501,7 +501,8 @@ struct CloneDialog: View {
     }
 
     private var problem: String? {
-        if url.trimmingCharacters(in: .whitespaces).isEmpty { return "Enter the repository URL." }
+        if let problem = GitArgument.cloneURLProblem(url) { return problem }
+        if let problem = GitArgument.folderNameProblem(folderName) { return problem }
         guard let destination else { return "Choose where to clone." }
         if FileManager.default.fileExists(atPath: destination.path),
            (try? FileManager.default.contentsOfDirectory(atPath: destination.path))?.isEmpty == false {
@@ -521,6 +522,12 @@ struct CloneDialog: View {
                         .textFieldStyle(.roundedBorder)
                         .focused($isURLFocused)
                         .onSubmit { if problem == nil { perform() } }
+                }
+                if let warning = GitArgument.cloneURLWarning(url) {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 FormRow(label: "Directory") {
                     HStack {

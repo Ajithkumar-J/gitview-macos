@@ -64,11 +64,11 @@ struct FilePathLabel: View {
 
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
-                Text(name)
+                Text(DisplayText.visible(name, keepNewlines: false))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if !directory.isEmpty {
-                    Text(directory)
+                    Text(DisplayText.visible(directory, keepNewlines: false))
                         .foregroundStyle(.secondary)
                         .font(.callout)
                         .lineLimit(1)

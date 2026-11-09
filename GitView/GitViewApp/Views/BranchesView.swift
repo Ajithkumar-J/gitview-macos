@@ -115,7 +115,7 @@ struct BranchRow: View {
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(branch.name)
+                Text(DisplayText.visible(branch.name, keepNewlines: false))
                     .fontWeight(branch.isCurrent ? .semibold : .regular)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -187,7 +187,7 @@ struct BranchDetailView: View {
                             .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(branch.name)
+                            Text(DisplayText.visible(branch.name, keepNewlines: false))
                                 .font(.title2.weight(.semibold))
                                 .textSelection(.enabled)
                             Text(kindDescription(branch))

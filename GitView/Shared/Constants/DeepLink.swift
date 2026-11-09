@@ -97,14 +97,32 @@ public struct GitViewDeepLink: Equatable, Sendable {
             return nil
         }
 
+        // Links can come from any app or web page: accept only absolute local
+        // paths (no "..", control characters or absurd sizes) and a bounded count.
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let paths = items.filter { $0.name == "path" }.compactMap(\.value).filter { !$0.isEmpty }
-        guard !paths.isEmpty else {
+        let rawPaths = items.filter { $0.name == "path" }.compactMap(\.value)
+        guard (1...Self.maximumPaths).contains(rawPaths.count) else {
             return nil
+        }
+        var paths = [String]()
+        for path in rawPaths {
+            guard let safe = Self.validatedPath(path) else { return nil }
+            paths.append(safe)
         }
 
         self.paths = paths
         self.action = items.first(where: { $0.name == "action" })?.value.flatMap(Action.init(rawValue:)) ?? .open
+    }
+
+    public static let maximumPaths = 1000
+
+    static func validatedPath(_ path: String) -> String? {
+        let hasControl = path.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+        guard path.hasPrefix("/"), path.utf8.count <= 4096, !hasControl,
+              !path.split(separator: "/").contains("..") else {
+            return nil
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
     public var url: URL? {

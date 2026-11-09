@@ -38,7 +38,7 @@ final class GitServiceWorkflowTests: XCTestCase {
     func testStageUnstageCommitHistoryAndBranches() async throws {
         // Empty repository: no commits, no history, files untracked.
         try write("hello\n", to: "Folder With Space/first file.txt")
-        var snapshot = try await service.loadRepository(at: repository.appendingPathComponent("Folder With Space"))
+        var snapshot = try await service.loadRepository(at: repository.appendingPathComponent("Folder With Space"), trust: { _ in false })
         XCTAssertEqual(snapshot.rootPath.standardizedFileURL.resolvingSymlinksInPath().path, repository.standardizedFileURL.resolvingSymlinksInPath().path)
         XCTAssertEqual(snapshot.branch, "main")
         XCTAssertFalse(snapshot.hasCommits)
@@ -56,10 +56,10 @@ final class GitServiceWorkflowTests: XCTestCase {
 
         // Stage, unstage before the first commit, stage again, commit.
         try await service.stage(snapshot.files, in: repository)
-        snapshot = try await service.loadRepository(at: repository)
+        snapshot = try await service.loadRepository(at: repository, trust: { _ in false })
         XCTAssertEqual(snapshot.changes(in: .staged).map(\.path), ["Folder With Space/first file.txt"])
         try await service.unstage(snapshot.files, in: repository)
-        snapshot = try await service.loadRepository(at: repository)
+        snapshot = try await service.loadRepository(at: repository, trust: { _ in false })
         XCTAssertEqual(snapshot.stagedCount, 0)
         try await service.stageAll(in: repository)
         let outcome = try await service.commit(message: "Initial commit\n\nBody text", in: repository)
@@ -70,7 +70,7 @@ final class GitServiceWorkflowTests: XCTestCase {
         try write("hello\nstaged\n", to: "Folder With Space/first file.txt")
         try await service.stageAll(in: repository)
         try write("hello\nstaged\nunstaged\n", to: "Folder With Space/first file.txt")
-        snapshot = try await service.loadRepository(at: repository)
+        snapshot = try await service.loadRepository(at: repository, trust: { _ in false })
         let staged = try XCTUnwrap(snapshot.changes(in: .staged).first)
         let unstaged = try XCTUnwrap(snapshot.changes(in: .unstaged).first)
         let stagedDiff = GitDiffParser.parse(try await service.diff(for: staged, in: repository))
@@ -80,7 +80,7 @@ final class GitServiceWorkflowTests: XCTestCase {
 
         // Discarding unstaged changes keeps the staged part.
         _ = try await service.discardChanges(unstaged, in: repository)
-        snapshot = try await service.loadRepository(at: repository)
+        snapshot = try await service.loadRepository(at: repository, trust: { _ in false })
         XCTAssertEqual(snapshot.changes(in: .unstaged), [])
         XCTAssertEqual(snapshot.changes(in: .staged).count, 1)
         _ = try await service.commit(message: "Second", in: repository)
@@ -133,7 +133,7 @@ final class GitServiceWorkflowTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
 
         do {
-            _ = try await service.loadRepository(at: folder)
+            _ = try await service.loadRepository(at: folder, trust: { _ in false })
             XCTFail("Expected notARepository")
         } catch GitServiceError.notARepository {
             // Expected.

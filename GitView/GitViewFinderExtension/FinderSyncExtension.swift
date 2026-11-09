@@ -1,5 +1,9 @@
 import Cocoa
 import FinderSync
+import os
+
+/// Paths stay private in the system log.
+private let log = Logger(subsystem: "com.local.GitView.FinderExtension", category: "menu")
 
 /// TortoiseGit-style Finder integration: a context menu that adapts to what
 /// was right-clicked (repository or not, files or folders) and a toolbar item.
@@ -19,7 +23,7 @@ final class FinderSyncExtension: FIFinderSync {
             homeURL.appendingPathComponent("Downloads", isDirectory: true),
             URL(fileURLWithPath: "/Volumes", isDirectory: true)
         ]
-        NSLog("GitView Finder extension loaded")
+        log.info("GitView Finder extension loaded")
     }
 
     // MARK: Toolbar button
@@ -138,7 +142,7 @@ final class FinderSyncExtension: FIFinderSync {
         configuration.activates = true
         NSWorkspace.shared.open(url, configuration: configuration) { _, error in
             if let error {
-                NSLog("GitView could not open \(url): \(error.localizedDescription)")
+                log.error("Could not open \(url.absoluteString, privacy: .private): \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -195,7 +199,7 @@ enum RepositoryLocator {
         var gitDirectory = dotGit
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory), !isDirectory.boolValue {
-            guard let text = try? String(contentsOf: dotGit, encoding: .utf8),
+            guard let text = readSmallFile(dotGit),
                   let line = text.split(separator: "\n").first(where: { $0.hasPrefix("gitdir:") }) else {
                 return nil
             }
@@ -205,11 +209,37 @@ enum RepositoryLocator {
                 : dotGit.deletingLastPathComponent().appendingPathComponent(path)
         }
 
-        guard let head = try? String(contentsOf: gitDirectory.appendingPathComponent("HEAD"), encoding: .utf8) else {
+        guard let head = readSmallFile(gitDirectory.appendingPathComponent("HEAD")) else {
             return nil
         }
         let trimmed = head.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = "ref: refs/heads/"
-        return trimmed.hasPrefix(prefix) ? String(trimmed.dropFirst(prefix.count)) : nil
+        guard trimmed.hasPrefix(prefix) else { return nil }
+        return menuSafe(String(trimmed.dropFirst(prefix.count)))
+    }
+
+    /// Reads a small regular file without ever blocking Finder: a hostile
+    /// repository could make `.git` or `HEAD` a FIFO, a device or a huge file.
+    static func readSmallFile(_ url: URL, limit: Int = 4096) -> String? {
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= limit,
+              let data = try? handle.read(upToCount: limit) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// A branch name as shown in the menu: no control or bidirectional-override
+    /// characters (which could disguise it), and not absurdly long.
+    static func menuSafe(_ name: String) -> String? {
+        let hidden: Set<UInt32> = [0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069]
+        let clean = String(String.UnicodeScalarView(name.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0) && !hidden.contains($0.value)
+        }))
+        guard !clean.isEmpty else { return nil }
+        return clean.count > 60 ? String(clean.prefix(57)) + "…" : clean
     }
 }

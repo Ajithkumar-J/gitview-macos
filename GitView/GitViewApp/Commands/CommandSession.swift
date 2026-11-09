@@ -127,7 +127,7 @@ final class CommandSession {
         }
 
         do {
-            let loaded = try await service.loadRepository(at: targetFolder)
+            let loaded = try await service.loadRepository(at: targetFolder, trust: RepositoryTrustPrompt.confirm)
             snapshot = loaded
             scopePaths = Self.relativePaths(for: selectedURLs, root: loaded.rootPath)
             phase = .ready
@@ -142,7 +142,7 @@ final class CommandSession {
         guard let service, let root else {
             return
         }
-        if let loaded = try? await service.loadRepository(at: root) {
+        if let loaded = try? await service.loadRepository(at: root, trust: RepositoryTrustPrompt.confirm) {
             snapshot = loaded
         }
     }
@@ -180,7 +180,7 @@ final class CommandSession {
         do {
             let output = try await body()
             self.followUps = followUps
-            result = CommandResult(title: success ?? "\(action.title) Finished", output: output, succeeded: true)
+            result = CommandResult(title: success ?? "\(action.title) Finished", output: Redactor.redact(output), succeeded: true)
             repositoryDidChange()
             return true
         } catch {
@@ -247,7 +247,15 @@ final class CommandWindows: NSObject, NSWindowDelegate {
 
     private var sessions = [ObjectIdentifier: (window: NSWindow, session: CommandSession)]()
 
+    /// A page could fire many gitview:// links; never pile up more windows than this.
+    static let maximumWindows = 12
+
     func show(_ link: GitViewDeepLink) {
+        guard sessions.count < Self.maximumWindows else {
+            NSSound.beep()
+            if let last = sessions.values.map(\.window).last { AppActivation.bringToFront(last) }
+            return
+        }
         let session = CommandSession(link: link)
         let host = NSHostingController(rootView: CommandRootView(session: session))
         host.sizingOptions = [.minSize]
