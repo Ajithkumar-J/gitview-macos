@@ -23,7 +23,7 @@ struct BranchListView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(model.branchFilter.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearchingRemote)
-                    .help("Search \(model.remoteName ?? "the remote") for branches that are not fetched yet")
+                    .help("Branches on \(model.remoteName ?? "the remote") are searched as you type. Click to refresh the list from the server.")
                 }
             }
             .padding(10)
@@ -49,7 +49,7 @@ struct BranchListView: View {
                             BranchRow(branch: branch).tag(branch.id)
                         }
                         if remote.isEmpty {
-                            emptyRow(model.branchFilter.isEmpty ? "Fetch to see remote branches." : "No fetched remote branches match.")
+                            emptyRow(model.branchFilter.isEmpty ? "Fetch to see remote branches, or type to search the server." : model.isSearchingRemote ? "Searching \(model.remoteName ?? "the server")…" : "No fetched remote branches match.")
                         }
                     } header: {
                         ListSectionHeader(title: "Remote", count: remote.count) {

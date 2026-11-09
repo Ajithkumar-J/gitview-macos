@@ -50,13 +50,21 @@ struct SwitchBranchDialog: View {
 
     @State private var catalog = BranchCatalog()
     @State private var filter = ""
+    @State private var serverMatches: [GitBranch] = []
+    @State private var isSearchingServer = false
     @State private var selection: GitBranch.ID?
     @State private var createNew = false
     @State private var newName = ""
     @State private var nameProblem: String?
 
     private var allBranches: [GitBranch] {
-        catalog.local + catalog.remote
+        catalog.local + catalog.remote + unfetched
+    }
+
+    /// Server branches matching the filter that are not fetched yet.
+    private var unfetched: [GitBranch] {
+        let known = Set(catalog.remote.map(\.name))
+        return serverMatches.filter { !known.contains($0.name) }
     }
 
     private var selected: GitBranch? {
@@ -65,7 +73,7 @@ struct SwitchBranchDialog: View {
 
     private func filtered(_ branches: [GitBranch]) -> [GitBranch] {
         let query = filter.trimmingCharacters(in: .whitespaces)
-        return query.isEmpty ? branches : branches.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        return query.isEmpty ? branches : branches.filter { BranchSearch.matches($0.name, query: query) }
     }
 
     private var problem: String? {
@@ -95,6 +103,18 @@ struct SwitchBranchDialog: View {
                     Section("Remote Branches") {
                         ForEach(remote) { branchRow($0).tag($0.id) }
                     }
+                }
+                if !unfetched.isEmpty {
+                    Section("On the Server — Not Fetched Yet") {
+                        ForEach(unfetched) { branchRow($0).tag($0.id) }
+                    }
+                }
+                if isSearchingServer {
+                    Label("Searching the server…", systemImage: "network")
+                        .foregroundStyle(.secondary)
+                } else if !filter.trimmingCharacters(in: .whitespaces).isEmpty, filtered(catalog.local).isEmpty, remote.isEmpty, unfetched.isEmpty {
+                    Text("No branches contain “\(filter)”.")
+                        .foregroundStyle(.secondary)
                 }
             }
             .listStyle(.inset)
@@ -129,6 +149,7 @@ struct SwitchBranchDialog: View {
             await catalog.load(session)
             selection = catalog.local.first(where: \.isCurrent)?.id
         }
+        .task(id: filter) { await searchServer() }
         .onChange(of: selection) { _, _ in
             if let selected, selected.isRemote, newName.isEmpty || catalog.remote.contains(where: { $0.localTrackingName == newName }) {
                 newName = selected.localTrackingName
@@ -168,6 +189,23 @@ struct SwitchBranchDialog: View {
         }
     }
 
+    /// Searches the server's branches as you type (the list is fetched once and cached).
+    private func searchServer() async {
+        let query = filter.trimmingCharacters(in: .whitespaces)
+        guard query.count >= 2, let service = session.service, let root = session.root,
+              let remote = session.snapshot?.defaultRemote else {
+            serverMatches = []
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        isSearchingServer = true
+        defer { isSearchingServer = false }
+        let results = (try? await RemoteBranchDirectory.shared.search(query, remote: remote, in: root, service: service)) ?? []
+        guard !Task.isCancelled else { return }
+        serverMatches = results
+    }
+
     private func perform() {
         guard let service = session.service, let root = session.root, let selected else { return }
         let createNew = createNew
@@ -175,6 +213,9 @@ struct SwitchBranchDialog: View {
         let target = createNew ? name : selected.isRemote ? selected.localTrackingName : selected.name
         Task {
             await session.run("Switching to \(target)…", success: "Switched to \(target)") {
+                if selected.isUnfetched {
+                    _ = try await service.fetchRemoteBranch(selected, in: root)
+                }
                 if createNew {
                     return try await service.createBranch(named: name, from: selected.name, switchToBranch: true, in: root)
                 }

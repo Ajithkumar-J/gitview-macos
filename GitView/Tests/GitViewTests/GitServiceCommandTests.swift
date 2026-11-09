@@ -191,4 +191,95 @@ final class GitServiceCommandTests: XCTestCase {
         XCTAssertEqual(cloneBranch, "feature/x")
         _ = try await service.fetch(remote: nil, prune: true, tags: false, in: clone)
     }
+
+    func testCommitRequiresIdentityAndSavesIt() async throws {
+        // Empty repository-level values hide any global identity on this machine.
+        try await git("config", "user.name", "")
+        try await git("config", "user.email", "")
+        try write("one\n", to: "a.txt")
+        let identity = await service.identity(in: repository)
+        XCTAssertFalse(identity.isComplete)
+        do {
+            _ = try await service.commit(message: "x", files: try await files(), in: repository)
+            XCTFail("Committing without an identity must fail")
+        } catch {
+            XCTAssertEqual(error as? GitServiceError, .identityNotConfigured)
+            XCTAssertNotNil((error as? LocalizedError)?.recoverySuggestion)
+        }
+        let unchanged = await service.hasCommits(in: repository)
+        XCTAssertFalse(unchanged, "No commit with an invented identity")
+
+        XCTAssertFalse(GitIdentity(name: "A", email: "not an email").isComplete)
+        try await service.saveIdentity(GitIdentity(name: " Ada Lovelace ", email: "ada@example.com"), globally: false, in: repository)
+        let saved = await service.identity(in: repository)
+        XCTAssertEqual(saved, GitIdentity(name: "Ada Lovelace", email: "ada@example.com"))
+        _ = try await service.commit(message: "First", files: try await files(), in: repository)
+        let author = try await git("log", "-1", "--format=%an <%ae>")
+        XCTAssertEqual(author.trimmingCharacters(in: .whitespacesAndNewlines), "Ada Lovelace <ada@example.com>")
+    }
+
+    func testFailureHintsAndSignInPrompt() throws {
+        func hint(_ stderr: String) -> String? {
+            GitServiceError.commandFailed(GitCommandResult(exitCode: 128, standardOutput: "", standardError: stderr, command: "git")).recoverySuggestion
+        }
+        XCTAssertTrue(hint("fatal: could not read Username for 'https://github.com': terminal prompts disabled")?.contains("personal access token") == true)
+        XCTAssertTrue(hint("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/a/b.git/'")?.contains("Sign-in") == true)
+        XCTAssertTrue(hint("git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.")?.contains("SSH key") == true)
+        XCTAssertTrue(hint("Host key verification failed.\nfatal: Could not read from remote repository.")?.contains("Connect") == true)
+        XCTAssertTrue(hint("remote: Permission to a/b.git denied to someone.\nfatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403")?.contains("does not have access") == true)
+        XCTAssertTrue(hint("remote: Repository not found.\nfatal: repository 'https://github.com/a/b.git/' not found")?.contains("not found") == true)
+        XCTAssertTrue(hint("fatal: unable to access 'https://x/': Could not resolve host: x")?.contains("network") == true)
+        XCTAssertNil(hint("error: Your local changes would be overwritten by merge."))
+
+        // Git and SSH are pointed at an executable sign-in prompt.
+        let environment = ProcessExecutor.gitProcessEnvironment(baseEnvironment: ["PATH": "/usr/bin"])
+        let askPass = try XCTUnwrap(environment["GIT_ASKPASS"])
+        XCTAssertEqual(environment["SSH_ASKPASS"], askPass)
+        XCTAssertEqual(environment["SSH_ASKPASS_REQUIRE"], "force")
+        XCTAssertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: askPass))
+        // A prompt configured by the user (or an IDE) is left alone.
+        let custom = ProcessExecutor.gitProcessEnvironment(baseEnvironment: ["GIT_ASKPASS": "/custom"])
+        XCTAssertEqual(custom["GIT_ASKPASS"], "/custom")
+    }
+
+    func testBranchSearchMatchesWordsAnywhereIgnoringCase() async throws {
+        XCTAssertTrue(BranchSearch.matches("Fetch-from-release-tag13", query: "release"))
+        XCTAssertTrue(BranchSearch.matches("428162_DuckDB_Connector_Release", query: "release"))
+        XCTAssertTrue(BranchSearch.matches("Fetch-from-release-tag13", query: "13 RELEASE"))
+        XCTAssertFalse(BranchSearch.matches("Fetch-from-release-tag13", query: "release 14"))
+
+        // Branches on a server, none of them fetched by this clone.
+        try write("base\n", to: "file.txt")
+        _ = try await service.commit(message: "Base", files: try await files(), in: repository)
+        let remote = sandbox.appendingPathComponent("remote.git")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try await git("init", "--bare", "-q", in: remote)
+        try await git("remote", "add", "origin", remote.path)
+        for name in ["Release_13_hotfix", "feature/release-notes", "BuildReleaseSource", "main"] {
+            try await git("push", "-q", "origin", "HEAD:refs/heads/\(name)")
+        }
+
+        let found = try await service.searchRemoteBranches(matching: "release", remote: "origin", in: repository)
+        XCTAssertEqual(found.map(\.name), ["origin/BuildReleaseSource", "origin/feature/release-notes", "origin/Release_13_hotfix"])
+        XCTAssertTrue(found.allSatisfy(\.isUnfetched))
+
+        // The directory lists the server once and reuses it until asked to refresh.
+        let directory = RemoteBranchDirectory()
+        let first = try await directory.search("release", remote: "origin", in: repository, service: service)
+        XCTAssertEqual(first.count, 3)
+        try await git("push", "-q", "origin", "HEAD:refs/heads/release/2026")
+        let cached = try await directory.search("release", remote: "origin", in: repository, service: service)
+        XCTAssertEqual(cached.count, 3, "Typing again does not contact the server")
+        let refreshed = try await directory.search("release", remote: "origin", in: repository, service: service, refresh: true)
+        XCTAssertEqual(refreshed.count, 4)
+
+        // A found branch can be fetched and checked out.
+        let target = try XCTUnwrap(refreshed.first { $0.name == "origin/Release_13_hotfix" })
+        _ = try await service.fetchRemoteBranch(target, in: repository)
+        _ = try await service.switchBranch(to: target, in: repository)
+        let current = try await service.currentBranch(in: repository)
+        XCTAssertEqual(current, "Release_13_hotfix")
+    }
 }
+

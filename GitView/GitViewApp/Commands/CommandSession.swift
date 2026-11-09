@@ -15,6 +15,8 @@ struct CommandResult: Equatable {
     let title: String
     let output: String
     let succeeded: Bool
+    /// Plain-language advice for a failure (sign-in, SSH key, network…).
+    var hint: String? = nil
 }
 
 /// State shared by one TortoiseGit-style command window: the repository and
@@ -183,7 +185,12 @@ final class CommandSession {
             return true
         } catch {
             self.followUps = []
-            result = CommandResult(title: failure ?? "\(action.title) Failed", output: error.localizedDescription, succeeded: false)
+            result = CommandResult(
+                title: failure ?? "\(action.title) Failed",
+                output: error.localizedDescription,
+                succeeded: false,
+                hint: (error as? LocalizedError)?.recoverySuggestion
+            )
             repositoryDidChange()
             return false
         }

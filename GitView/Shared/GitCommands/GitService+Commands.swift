@@ -39,6 +39,9 @@ public extension GitService {
         guard amend || !files.isEmpty else {
             throw GitServiceError.noFilesSelected
         }
+        guard await identity(in: repositoryURL).isComplete else {
+            throw GitServiceError.identityNotConfigured
+        }
 
         let untracked = files.filter(\.isUntracked).map(\.path)
         if !untracked.isEmpty {
@@ -268,3 +271,111 @@ public extension GitService {
         return paths.filter { seen.insert($0).inserted }
     }
 }
+
+// MARK: - Identity
+
+/// The name and email Git records as author and committer.
+public struct GitIdentity: Equatable, Sendable {
+    public var name: String
+    public var email: String
+
+    public init(name: String, email: String) {
+        self.name = name
+        self.email = email
+    }
+
+    public var isComplete: Bool {
+        let email = email.trimmingCharacters(in: .whitespaces)
+        return !name.trimmingCharacters(in: .whitespaces).isEmpty
+            && email.contains("@") && !email.contains(" ")
+    }
+}
+
+public extension GitService {
+    /// `user.name` / `user.email` as Git resolves them for the repository
+    /// (repository, then global, then system configuration). Without them Git
+    /// silently invents an identity such as "you@Mac.local".
+    func identity(in repositoryURL: URL?) async -> GitIdentity {
+        func value(_ key: String) async -> String {
+            let result = try? await runGit(["config", "--get", key], workingDirectory: repositoryURL)
+            return result?.success == true ? result!.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        }
+        return GitIdentity(name: await value("user.name"), email: await value("user.email"))
+    }
+
+    /// Saves the identity for every repository (`--global`), or only for `repositoryURL`.
+    func saveIdentity(_ identity: GitIdentity, globally: Bool = true, in repositoryURL: URL? = nil) async throws {
+        let scope = globally ? ["--global"] : []
+        let name = identity.name.trimmingCharacters(in: .whitespaces)
+        let email = identity.email.trimmingCharacters(in: .whitespaces)
+        for (key, value) in [("user.name", name), ("user.email", email)] {
+            let result = try await runGit(["config"] + scope + [key, value], workingDirectory: repositoryURL)
+            guard result.success else {
+                throw GitServiceError.commandFailed(result)
+            }
+        }
+    }
+}
+
+// MARK: - Branch search
+
+/// How GitView matches typed text against branch names everywhere: every word
+/// must appear somewhere in the name, ignoring case and order. "release 13"
+/// matches "Fetch-from-release-tag13" and "Release_13_hotfix".
+public enum BranchSearch {
+    public static let resultLimit = 300
+
+    public static func matches(_ name: String, query: String) -> Bool {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        return words.allSatisfy { name.localizedCaseInsensitiveContains($0) }
+    }
+
+    /// Server branch names that match, as `remote/name` branches marked unfetched.
+    public static func unfetchedBranches(_ names: [String], matching query: String, remote: String, limit: Int = resultLimit) -> [GitBranch] {
+        names
+            .filter { matches($0, query: query) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .prefix(limit)
+            .map { GitBranch(name: "\(remote)/\($0)", isCurrent: false, isRemote: true, isUnfetched: true) }
+    }
+}
+
+/// Branch names on each server, listed once and reused for a few minutes, so
+/// search-as-you-type does not contact the server on every keystroke. Shared by
+/// the main window and every command window.
+public actor RemoteBranchDirectory {
+    public static let shared = RemoteBranchDirectory()
+    public static let maximumAge: TimeInterval = 180
+
+    private var lists: [String: (date: Date, names: [String])] = [:]
+    private var loading: [String: Task<[String], Error>] = [:]
+
+    public init() {}
+
+    /// Branch names on `remote`; `refresh` asks the server even when a recent list exists.
+    public func branchNames(remote: String, in repositoryURL: URL, service: GitService, refresh: Bool = false) async throws -> [String] {
+        let key = repositoryURL.standardizedFileURL.path + "\u{0}" + remote
+        if !refresh, let list = lists[key], Date().timeIntervalSince(list.date) < Self.maximumAge {
+            return list.names
+        }
+        if let task = loading[key] {
+            return try await task.value
+        }
+        let task = Task { try await service.remoteBranchNames(remote: remote, in: repositoryURL) }
+        loading[key] = task
+        defer { loading[key] = nil }
+        let names = try await task.value
+        lists[key] = (Date(), names)
+        return names
+    }
+
+    /// Matching server branches (not yet fetched ones are marked `isUnfetched`).
+    public func search(_ query: String, remote: String, in repositoryURL: URL, service: GitService, refresh: Bool = false) async throws -> [GitBranch] {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        let names = try await branchNames(remote: remote, in: repositoryURL, service: service, refresh: refresh)
+        return BranchSearch.unfetchedBranches(names, matching: query, remote: remote)
+    }
+}
+
