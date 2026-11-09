@@ -161,7 +161,11 @@ public extension GitService {
         var arguments = ["fetch"]
         if prune { arguments.append("--prune") }
         if tags { arguments.append("--tags") }
-        arguments += remote.map { [$0] } ?? ["--all"]
+        if let remote {
+            arguments += ["--end-of-options", try GitArgument.name(remote, kind: "remote")]
+        } else {
+            arguments.append("--all")
+        }
         let result = try await runChecked(arguments, in: repositoryURL)
         return commandOutput(from: result, fallback: "Fetch complete. Already up to date.")
     }
@@ -179,7 +183,10 @@ public extension GitService {
         if setUpstream { arguments.append("--set-upstream") }
         if forceWithLease { arguments.append("--force-with-lease") }
         if includeTags { arguments.append("--follow-tags") }
-        arguments += [remote, "refs/heads/\(localBranch):refs/heads/\(remoteBranch)"]
+        let remote = try GitArgument.name(remote, kind: "remote")
+        let localBranch = try GitArgument.name(localBranch, kind: "branch")
+        let remoteBranch = try GitArgument.name(remoteBranch, kind: "branch")
+        arguments += ["--end-of-options", remote, "refs/heads/\(localBranch):refs/heads/\(remoteBranch)"]
         let result = try await runChecked(arguments, in: repositoryURL)
         return commandOutput(from: result, fallback: "Everything up-to-date.")
     }
@@ -203,8 +210,8 @@ public extension GitService {
     }
 
     func createBranch(named name: String, from startPoint: String?, switchToBranch: Bool, in repositoryURL: URL) async throws -> String {
-        let name = name.trimmingCharacters(in: .whitespaces)
-        let start = startPoint.map { [$0] } ?? []
+        let name = try GitArgument.name(name, kind: "branch")
+        let start = try startPoint.map { ["--end-of-options", try GitArgument.name($0, kind: "branch")] } ?? []
         let arguments = switchToBranch ? ["switch", "-c", name] + start : ["branch", name] + start
         let result = try await runChecked(arguments, in: repositoryURL)
         let fallback = switchToBranch ? "Switched to new branch \(name)." : "Created branch \(name)."
@@ -245,8 +252,11 @@ public extension GitService {
     // MARK: - Clone / Init
 
     func clone(url: String, into directory: URL, branch: String?, recurseSubmodules: Bool) async throws -> String {
+        if let problem = GitArgument.cloneURLProblem(url) ?? GitArgument.folderNameProblem(directory.lastPathComponent) {
+            throw GitServiceError.invalidName(kind: "repository URL", value: problem)
+        }
         var arguments = ["clone"]
-        if let branch, !branch.isEmpty { arguments += ["--branch", branch] }
+        if let branch, !branch.isEmpty { arguments += ["--branch", try GitArgument.name(branch, kind: "branch")] }
         if recurseSubmodules { arguments.append("--recurse-submodules") }
         arguments += ["--", url, directory.path]
         let result = try await runGit(arguments, workingDirectory: directory.deletingLastPathComponent())

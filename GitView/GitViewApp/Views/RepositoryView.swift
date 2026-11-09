@@ -180,7 +180,7 @@ private struct BranchMenu: View {
                         if branch.isCurrent {
                             Label(branch.name, systemImage: "checkmark")
                         } else {
-                            Text(branch.name)
+                            Text(DisplayText.visible(branch.name, keepNewlines: false))
                         }
                     }
                     .disabled(branch.isCurrent)
@@ -296,7 +296,7 @@ struct OutputLogView: View {
                                     .foregroundStyle(.secondary)
                                     .font(.caption)
                             }
-                            Text(entry.text)
+                            Text(DisplayText.visible(entry.text))
                                 .font(.system(.callout, design: .monospaced))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)

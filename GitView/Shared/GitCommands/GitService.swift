@@ -10,6 +10,8 @@ public enum GitServiceError: LocalizedError, Equatable {
     case noRemoteConfigured
     case detachedHeadRemoteOperation
     case identityNotConfigured
+    case invalidName(kind: String, value: String)
+    case repositoryNotTrusted(String)
     case commandFailed(GitCommandResult)
 
     public var errorDescription: String? {
@@ -32,6 +34,10 @@ public enum GitServiceError: LocalizedError, Equatable {
             "Pull and push are unavailable while the repository is in detached HEAD state."
         case .identityNotConfigured:
             "Git doesn't know your name and email address yet."
+        case .repositoryNotTrusted(let name):
+            "GitView didn't open “\(name)” because you chose not to trust its settings. Nothing was run."
+        case .invalidName(let kind, let value):
+            "“\(DisplayText.visible(value, keepNewlines: false))” is not a valid \(kind) name. Names can't start with “-” or contain control characters."
         case .commandFailed(let result):
             Self.message(for: result)
         }
@@ -53,7 +59,7 @@ public enum GitServiceError: LocalizedError, Equatable {
         let error = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
         let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = [error, output].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        return text.isEmpty ? "Git exited with code \(result.exitCode)." : text
+        return text.isEmpty ? "Git exited with code \(result.exitCode)." : Redactor.redact(text)
     }
 }
 
@@ -65,6 +71,14 @@ public enum GitFailureHint {
         let text = output.lowercased()
         func has(_ needles: String...) -> Bool { needles.contains { text.contains($0) } }
 
+        if has("detected dubious ownership") {
+            return "This repository belongs to another user account, so Git refuses to work in it (a protection against repositories that could run code). "
+                + "If you trust it, run in Terminal: git config --global --add safe.directory <repository path>"
+        }
+        if has("remote host identification has changed") {
+            return "WARNING: the server's identity changed since you last connected. Someone may be intercepting the connection. "
+                + "Don't continue unless your administrator confirms the server's key was replaced; then remove the old key with ssh-keygen -R <host>."
+        }
         if has("author identity unknown", "unable to auto-detect email", "empty ident name") {
             return identity
         }
@@ -139,7 +153,7 @@ public final class GitService: Sendable {
         let pathEnvironment = ProcessInfo.processInfo.environment["PATH"] ?? ""
         for directory in pathEnvironment.split(separator: ":") {
             let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent("git")
-            if candidate.path != "/usr/bin/git", fileManager.isExecutableFile(atPath: candidate.path) {
+            if directory.hasPrefix("/"), candidate.path != "/usr/bin/git", fileManager.isExecutableFile(atPath: candidate.path) {
                 return candidate
             }
         }
@@ -162,8 +176,21 @@ public final class GitService: Sendable {
 
     // MARK: - Repository
 
-    public func loadRepository(at selectedURL: URL) async throws -> GitRepositorySnapshot {
+    /// Asked when a repository's own settings or hooks would make Git run programs;
+    /// returns true to trust them. Usually shows a dialog.
+    public typealias TrustDecision = @Sendable (RepositorySafetyReport) async -> Bool
+
+    /// Opens a repository: finds its root, makes sure its settings are trusted
+    /// (before any command that could run them, such as status), then reads it.
+    public func loadRepository(at selectedURL: URL, trust: TrustDecision) async throws -> GitRepositorySnapshot {
         let rootPath = try await repositoryRoot(for: selectedURL)
+        let report = await safetyReport(in: rootPath)
+        if !RepositoryTrustStore.shared.isTrusted(report) {
+            guard await trust(report) else {
+                throw GitServiceError.repositoryNotTrusted(rootPath.lastPathComponent)
+            }
+            RepositoryTrustStore.shared.trust(report)
+        }
         async let summaryTask = statusSummary(in: rootPath)
         async let remotesTask = remotes(in: rootPath)
         let summary = try await summaryTask
@@ -264,7 +291,8 @@ public final class GitService: Sendable {
 
     /// Every branch name on `remote` (`git ls-remote --heads`), without the `refs/heads/` prefix.
     public func remoteBranchNames(remote: String, in repositoryURL: URL) async throws -> [String] {
-        let result = try await runGit(["ls-remote", "--heads", remote], workingDirectory: repositoryURL)
+        let remote = try GitArgument.name(remote, kind: "remote")
+        let result = try await runGit(["ls-remote", "--heads", "--end-of-options", remote], workingDirectory: repositoryURL)
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
@@ -281,16 +309,17 @@ public final class GitService: Sendable {
     public func switchBranch(to branch: GitBranch, in repositoryURL: URL) async throws -> String {
         let arguments: [String]
         var notes = [String]()
+        _ = try GitArgument.name(branch.name, kind: "branch")
         if branch.isRemote, await localBranchExists(branch.localTrackingName, in: repositoryURL) {
-            arguments = ["switch", branch.localTrackingName]
+            arguments = ["switch", "--end-of-options", try GitArgument.name(branch.localTrackingName, kind: "branch")]
         } else if branch.isRemote {
             // --track needs the remote's fetch settings to cover the branch.
             if let remote = branch.remoteName, let note = try await includeInFetch(remote: remote, branch: branch.localTrackingName, in: repositoryURL) {
                 notes.append(note)
             }
-            arguments = ["switch", "--track", branch.name]
+            arguments = ["switch", "--track", "--end-of-options", branch.name]
         } else {
-            arguments = ["switch", branch.name]
+            arguments = ["switch", "--end-of-options", branch.name]
         }
 
         let result = try await runGit(arguments, workingDirectory: repositoryURL)
@@ -308,6 +337,8 @@ public final class GitService: Sendable {
     /// Returns a note for the output when the configuration changed.
     @discardableResult
     func includeInFetch(remote: String, branch: String, in repositoryURL: URL) async throws -> String? {
+        let remote = try GitArgument.name(remote, kind: "remote")
+        let branch = try GitArgument.name(branch, kind: "branch")
         let result = try await runGit(["config", "--get-all", "remote.\(remote).fetch"], workingDirectory: repositoryURL)
         let refspecs = result.success ? result.standardOutput.split(whereSeparator: \.isNewline).map(String.init) : []
         guard !Self.refspecs(refspecs, cover: "refs/heads/\(branch)") else {
@@ -340,14 +371,15 @@ public final class GitService: Sendable {
 
     /// Fetches a single remote branch so it can be checked out.
     public func fetchRemoteBranch(_ branch: GitBranch, in repositoryURL: URL) async throws -> String {
-        guard branch.isRemote, let remote = branch.remoteName else {
+        guard branch.isRemote, let remoteName = branch.remoteName else {
             return ""
         }
 
-        let remoteBranchName = branch.localTrackingName
+        let remote = try GitArgument.name(remoteName, kind: "remote")
+        let remoteBranchName = try GitArgument.name(branch.localTrackingName, kind: "branch")
         let note = try await includeInFetch(remote: remote, branch: remoteBranchName, in: repositoryURL)
         let result = try await runGit(
-            ["fetch", remote, "\(remoteBranchName):refs/remotes/\(remote)/\(remoteBranchName)"],
+            ["fetch", "--end-of-options", remote, "\(remoteBranchName):refs/remotes/\(remote)/\(remoteBranchName)"],
             workingDirectory: repositoryURL
         )
         guard result.success else {
@@ -489,9 +521,10 @@ public final class GitService: Sendable {
     }
 
     public func commitDetail(hash: String, in repositoryURL: URL) async throws -> GitCommitDetail {
-        async let headerTask = runGit(["show", "-s", GitLogParser.detailFormat, hash], workingDirectory: repositoryURL)
+        let hash = try GitArgument.commit(hash)
+        async let headerTask = runGit(["show", "-s", GitLogParser.detailFormat, "--end-of-options", hash], workingDirectory: repositoryURL)
         async let filesTask = runGit(
-            ["show", "--format=", "--name-status", "-z", "-M", "--diff-merges=first-parent", hash],
+            ["show", "--format=", "--name-status", "-z", "-M", "--diff-merges=first-parent", "--no-ext-diff", "--end-of-options", hash],
             workingDirectory: repositoryURL
         )
 
@@ -513,6 +546,7 @@ public final class GitService: Sendable {
     }
 
     public func diff(for file: GitCommitFile, inCommit hash: String, in repositoryURL: URL) async throws -> String {
+        let hash = try GitArgument.commit(hash)
         let result = try await runGit(
             ["show", "--format=", "--no-color", "--no-ext-diff", "-M", "--diff-merges=first-parent", hash, "--"] + file.allPaths,
             workingDirectory: repositoryURL
@@ -544,7 +578,7 @@ public final class GitService: Sendable {
         let target = try await pullTarget(for: sourceBranch, remote: remote, in: repositoryURL)
 
         if let sourceBranch = target.sourceBranch, let remote = target.remote {
-            _ = try await runChecked(["fetch", remote, sourceBranch], in: repositoryURL)
+            _ = try await runChecked(["fetch", "--end-of-options", try GitArgument.name(remote, kind: "remote"), try GitArgument.name(sourceBranch, kind: "branch")], in: repositoryURL)
         } else {
             _ = try await runChecked(["fetch"], in: repositoryURL)
         }
@@ -599,7 +633,7 @@ public final class GitService: Sendable {
         let target = try await pullTarget(for: sourceBranch, remote: remote, in: repositoryURL)
         var arguments = ["pull"] + strategy.gitArguments
         if let sourceBranch = target.sourceBranch, let remote = target.remote {
-            arguments += [remote, sourceBranch]
+            arguments += ["--end-of-options", try GitArgument.name(remote, kind: "remote"), try GitArgument.name(sourceBranch, kind: "branch")]
         }
 
         let result = try await runGit(arguments, workingDirectory: repositoryURL)
@@ -628,7 +662,10 @@ public final class GitService: Sendable {
             throw GitServiceError.noRemoteConfigured
         }
 
-        let result = try await runGit(["push", "--set-upstream", remote, branch], workingDirectory: repositoryURL)
+        let result = try await runGit(
+            ["push", "--set-upstream", "--end-of-options", try GitArgument.name(remote, kind: "remote"), try GitArgument.name(branch, kind: "branch")],
+            workingDirectory: repositoryURL
+        )
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
@@ -706,7 +743,9 @@ public final class GitService: Sendable {
             // Ignore working-tree executable-bit noise consistently for status,
             // diffs and staging without changing the repository's configuration.
             // quotePath=false keeps non-ASCII file names readable.
-            arguments: ["-c", "core.filemode=false", "-c", "core.quotePath=false", "-c", "color.ui=false"] + arguments,
+            // Transports that run local commands (ext::, fd::) are always refused.
+            arguments: ["-c", "core.filemode=false", "-c", "core.quotePath=false", "-c", "color.ui=false",
+                        "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"] + arguments,
             workingDirectory: workingDirectory
         )
     }
@@ -717,7 +756,7 @@ public final class GitService: Sendable {
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
 
-        return combinedOutput.isEmpty ? fallback : combinedOutput
+        return combinedOutput.isEmpty ? fallback : Redactor.redact(combinedOutput)
     }
 }
 

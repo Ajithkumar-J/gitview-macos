@@ -16,6 +16,8 @@ GitView is a local SwiftUI macOS Git client for inspecting and working with repo
 - **TortoiseGit-style Finder menu**: right-click any file or folder for Git commands; each command opens its own small window (see Finder Integration).
 - **Sign-in and setup prompts**: GitView asks for your user name and token (or SSH passphrase) the first time a server needs them, asks whether to trust a new SSH server, and asks for your name and email before your first commit. Failures come with a plain-language explanation next to Git's output.
 
+**Security:** GitView asks before opening a repository whose own settings or hooks would run programs, refuses option-like names from repositories, and redacts credentials from everything it shows. See [SECURITY.md](SECURITY.md) for the full checklist and how to run the security tests.
+
 ## Getting Started
 
 ### 1. Install Git

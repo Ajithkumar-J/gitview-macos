@@ -163,7 +163,7 @@ struct CommandResultView: View {
             Divider()
 
             ScrollView {
-                Text(result.output.isEmpty ? "Git reported no output." : result.output)
+                Text(result.output.isEmpty ? "Git reported no output." : DisplayText.visible(result.output))
                     .font(.system(.callout, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)

@@ -29,11 +29,11 @@ struct DiffPane<Accessory: View>: View {
                 .frame(width: 20, height: 20)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text((path as NSString).lastPathComponent)
+                Text(DisplayText.visible((path as NSString).lastPathComponent, keepNewlines: false))
                     .font(.headline)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(subtitleText(path: path))
+                Text(DisplayText.visible(subtitleText(path: path), keepNewlines: false))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -247,7 +247,7 @@ private enum DiffRenderer {
             }
 
             result.append(NSAttributedString(string: " " + gutter, attributes: gutterAttributes))
-            result.append(NSAttributedString(string: line.text.replacingOccurrences(of: "\t", with: "    ") + "\n", attributes: textAttributes))
+            result.append(NSAttributedString(string: DisplayText.visible(line.text.replacingOccurrences(of: "\t", with: "    "), keepNewlines: false) + "\n", attributes: textAttributes))
 
             if let background {
                 result.addAttribute(.diffLineBackground, value: background, range: NSRange(location: lineStart, length: result.length - lineStart))

@@ -41,7 +41,7 @@ enum ExternalApps {
             let process = Process()
             process.executableURL = cli
             process.arguments = urls.map(\.path)
-            process.environment = ProcessExecutor.gitProcessEnvironment()
+            process.environment = ProcessExecutor.toolEnvironment()
             // Do not attach pipes: the editor may outlive this call and keep them open.
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice

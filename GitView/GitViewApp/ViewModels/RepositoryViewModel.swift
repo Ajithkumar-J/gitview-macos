@@ -181,7 +181,7 @@ final class RepositoryViewModel {
         defer { isOpening = false }
 
         do {
-            let loaded = try await gitService.loadRepository(at: url)
+            let loaded = try await gitService.loadRepository(at: url, trust: RepositoryTrustPrompt.confirm)
             let isSameRepository = loaded.rootPath == snapshot?.rootPath
             if !isSameRepository {
                 resetRepositoryState()
@@ -246,7 +246,7 @@ final class RepositoryViewModel {
         defer { isRefreshing = false }
 
         do {
-            let loaded = try await gitService.loadRepository(at: root)
+            let loaded = try await gitService.loadRepository(at: root, trust: RepositoryTrustPrompt.confirm)
             let previousHead = snapshot?.headOID
             snapshot = loaded
             if pullSourceBranch.isEmpty {
@@ -330,7 +330,7 @@ final class RepositoryViewModel {
     }
 
     func log(title: String, text: String, isError: Bool) {
-        outputLog.append(OutputEntry(title: title, text: text, isError: isError))
+        outputLog.append(OutputEntry(title: title, text: Redactor.redact(text), isError: isError))
         if outputLog.count > 200 {
             outputLog.removeFirst(outputLog.count - 200)
         }
