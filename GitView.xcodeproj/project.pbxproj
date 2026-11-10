@@ -11,10 +11,7 @@
 		8A0000010000000000000002 /* RepositoryViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001002 /* RepositoryViewModel.swift */; };
 		8A0000010000000000000003 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001003 /* ContentView.swift */; };
 		8A0000010000000000000004 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001004 /* SidebarView.swift */; };
-		8A0000010000000000000005 /* RepositoryDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001005 /* RepositoryDetailView.swift */; };
-		8A0000010000000000000006 /* EmptyRepositoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001006 /* EmptyRepositoryView.swift */; };
 		8A0000010000000000000007 /* ChangesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001007 /* ChangesView.swift */; };
-		8A0000010000000000000008 /* FileStatusRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001008 /* FileStatusRow.swift */; };
 		8A0000010000000000000009 /* AppConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001009 /* AppConstants.swift */; };
 		8A000001000000000000000A /* GitCommandResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000001000000000000100A /* GitCommandResult.swift */; };
 		8A000001000000000000000B /* GitFileStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000001000000000000100B /* GitFileStatus.swift */; };
@@ -33,6 +30,29 @@
 		8A0000010000000000000018 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000010000000000001019 /* AppDelegate.swift */; };
 		8A0000020000000000000001 /* FinderSyncExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000020000000000001001 /* FinderSyncExtension.swift */; };
 		8A0000020000000000000002 /* GitViewFinderExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 8A0000020000000000001010 /* GitViewFinderExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		8A0000030000000000000001 /* GitChange.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001001 /* GitChange.swift */; };
+		8A0000030000000000000002 /* GitCommit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001002 /* GitCommit.swift */; };
+		8A0000030000000000000003 /* GitDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001003 /* GitDiff.swift */; };
+		8A0000030000000000000004 /* GitLogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001004 /* GitLogParser.swift */; };
+		8A0000030000000000000005 /* GitDiffParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001005 /* GitDiffParser.swift */; };
+		8A0000030000000000000006 /* DeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001006 /* DeepLink.swift */; };
+		8A0000030000000000002006 /* DeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001006 /* DeepLink.swift */; };
+		8A0000030000000000000007 /* ViewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001007 /* ViewState.swift */; };
+		8A0000030000000000000008 /* RecentRepositories.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001008 /* RecentRepositories.swift */; };
+		8A0000030000000000000009 /* ExternalApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000030000000000001009 /* ExternalApps.swift */; };
+		8A000003000000000000000A /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000003000000000000100A /* Components.swift */; };
+		8A000003000000000000000B /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000003000000000000100B /* HistoryView.swift */; };
+		8A000003000000000000000C /* RepositoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000003000000000000100C /* RepositoryView.swift */; };
+		8A000003000000000000000D /* PullPreviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000003000000000000100D /* PullPreviewSheet.swift */; };
+		8A000003000000000000000E /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A000003000000000000100E /* WelcomeView.swift */; };
+		8A0000070000000000000001 /* RepositorySafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000070000000000001001 /* RepositorySafety.swift */; };
+		8A0000040000000000000001 /* GitService+Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000040000000000001001 /* GitService+Commands.swift */; };
+		8A0000040000000000000002 /* CommandSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000040000000000001002 /* CommandSession.swift */; };
+		8A0000040000000000000003 /* CommandViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000040000000000001003 /* CommandViews.swift */; };
+		8A0000040000000000000004 /* ChangeDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000040000000000001004 /* ChangeDialogs.swift */; };
+		8A0000040000000000000005 /* RemoteDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000040000000000001005 /* RemoteDialogs.swift */; };
+		8A0000040000000000000006 /* RepositoryDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0000040000000000001006 /* RepositoryDialogs.swift */; };
+		8A0000060000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8A0000060000000000001001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,10 +84,7 @@
 		8A0000010000000000001002 /* RepositoryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryViewModel.swift; sourceTree = "<group>"; };
 		8A0000010000000000001003 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		8A0000010000000000001004 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
-		8A0000010000000000001005 /* RepositoryDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryDetailView.swift; sourceTree = "<group>"; };
-		8A0000010000000000001006 /* EmptyRepositoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyRepositoryView.swift; sourceTree = "<group>"; };
 		8A0000010000000000001007 /* ChangesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangesView.swift; sourceTree = "<group>"; };
-		8A0000010000000000001008 /* FileStatusRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStatusRow.swift; sourceTree = "<group>"; };
 		8A0000010000000000001009 /* AppConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConstants.swift; sourceTree = "<group>"; };
 		8A000001000000000000100A /* GitCommandResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCommandResult.swift; sourceTree = "<group>"; };
 		8A000001000000000000100B /* GitFileStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileStatus.swift; sourceTree = "<group>"; };
@@ -90,6 +107,28 @@
 		8A0000020000000000001003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		8A0000020000000000001004 /* GitViewFinderExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GitViewFinderExtension.entitlements; sourceTree = "<group>"; };
 		8A0000020000000000001010 /* GitViewFinderExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = GitViewFinderExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		8A0000030000000000001001 /* GitChange.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitChange.swift; sourceTree = "<group>"; };
+		8A0000030000000000001002 /* GitCommit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCommit.swift; sourceTree = "<group>"; };
+		8A0000030000000000001003 /* GitDiff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiff.swift; sourceTree = "<group>"; };
+		8A0000030000000000001004 /* GitLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitLogParser.swift; sourceTree = "<group>"; };
+		8A0000030000000000001005 /* GitDiffParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiffParser.swift; sourceTree = "<group>"; };
+		8A0000030000000000001006 /* DeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepLink.swift; sourceTree = "<group>"; };
+		8A0000030000000000001007 /* ViewState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewState.swift; sourceTree = "<group>"; };
+		8A0000030000000000001008 /* RecentRepositories.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentRepositories.swift; sourceTree = "<group>"; };
+		8A0000030000000000001009 /* ExternalApps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalApps.swift; sourceTree = "<group>"; };
+		8A000003000000000000100A /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		8A000003000000000000100B /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
+		8A000003000000000000100C /* RepositoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryView.swift; sourceTree = "<group>"; };
+		8A000003000000000000100D /* PullPreviewSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullPreviewSheet.swift; sourceTree = "<group>"; };
+		8A000003000000000000100E /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
+		8A0000070000000000001001 /* RepositorySafety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositorySafety.swift; sourceTree = "<group>"; };
+		8A0000040000000000001001 /* GitService+Commands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GitService+Commands.swift"; sourceTree = "<group>"; };
+		8A0000040000000000001002 /* CommandSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSession.swift; sourceTree = "<group>"; };
+		8A0000040000000000001003 /* CommandViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandViews.swift; sourceTree = "<group>"; };
+		8A0000040000000000001004 /* ChangeDialogs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangeDialogs.swift; sourceTree = "<group>"; };
+		8A0000040000000000001005 /* RemoteDialogs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDialogs.swift; sourceTree = "<group>"; };
+		8A0000040000000000001006 /* RepositoryDialogs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryDialogs.swift; sourceTree = "<group>"; };
+		8A0000060000000000001001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -124,6 +163,10 @@
 		8A0000010000000000003003 /* GitViewApp */ = {
 			isa = PBXGroup;
 			children = (
+				8A0000060000000000001001 /* Assets.xcassets */,
+				8A0000040000000000003001 /* Commands */,
+				8A0000030000000000003002 /* Services */,
+				8A0000030000000000003001 /* Models */,
 				8A0000010000000000001001 /* GitViewApp.swift */,
 				8A0000010000000000001019 /* AppDelegate.swift */,
 				8A0000020000000000001003 /* Info.plist */,
@@ -147,13 +190,15 @@
 			children = (
 				8A0000010000000000001003 /* ContentView.swift */,
 				8A0000010000000000001004 /* SidebarView.swift */,
-				8A0000010000000000001005 /* RepositoryDetailView.swift */,
-				8A0000010000000000001006 /* EmptyRepositoryView.swift */,
 				8A0000010000000000001007 /* ChangesView.swift */,
 				8A0000010000000000001012 /* DiffView.swift */,
 				8A0000010000000000001013 /* CommitPanelView.swift */,
 				8A0000010000000000001018 /* BranchesView.swift */,
-				8A0000010000000000001008 /* FileStatusRow.swift */,
+				8A000003000000000000100A /* Components.swift */,
+				8A000003000000000000100B /* HistoryView.swift */,
+				8A000003000000000000100C /* RepositoryView.swift */,
+				8A000003000000000000100D /* PullPreviewSheet.swift */,
+				8A000003000000000000100E /* WelcomeView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -181,6 +226,7 @@
 			isa = PBXGroup;
 			children = (
 				8A0000010000000000001009 /* AppConstants.swift */,
+				8A0000030000000000001006 /* DeepLink.swift */,
 			);
 			path = Constants;
 			sourceTree = "<group>";
@@ -195,6 +241,9 @@
 				8A0000010000000000001016 /* GitBranch.swift */,
 				8A000001000000000000100B /* GitFileStatus.swift */,
 				8A000001000000000000100C /* GitRepositorySnapshot.swift */,
+				8A0000030000000000001001 /* GitChange.swift */,
+				8A0000030000000000001002 /* GitCommit.swift */,
+				8A0000030000000000001003 /* GitDiff.swift */,
 			);
 			path = GitModels;
 			sourceTree = "<group>";
@@ -205,6 +254,10 @@
 				8A000001000000000000100D /* ProcessExecutor.swift */,
 				8A000001000000000000100E /* GitStatusParser.swift */,
 				8A000001000000000000100F /* GitService.swift */,
+				8A0000030000000000001004 /* GitLogParser.swift */,
+				8A0000030000000000001005 /* GitDiffParser.swift */,
+				8A0000040000000000001001 /* GitService+Commands.swift */,
+				8A0000070000000000001001 /* RepositorySafety.swift */,
 			);
 			path = GitCommands;
 			sourceTree = "<group>";
@@ -217,6 +270,35 @@
 				8A0000020000000000001004 /* GitViewFinderExtension.entitlements */,
 			);
 			path = GitViewFinderExtension;
+			sourceTree = "<group>";
+		};
+		8A0000030000000000003001 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				8A0000030000000000001007 /* ViewState.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		8A0000030000000000003002 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				8A0000030000000000001008 /* RecentRepositories.swift */,
+				8A0000030000000000001009 /* ExternalApps.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		8A0000040000000000003001 /* Commands */ = {
+			isa = PBXGroup;
+			children = (
+				8A0000040000000000001002 /* CommandSession.swift */,
+				8A0000040000000000001003 /* CommandViews.swift */,
+				8A0000040000000000001004 /* ChangeDialogs.swift */,
+				8A0000040000000000001005 /* RemoteDialogs.swift */,
+				8A0000040000000000001006 /* RepositoryDialogs.swift */,
+			);
+			path = Commands;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -300,6 +382,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8A0000060000000000000001 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -323,10 +406,7 @@
 				8A0000010000000000000016 /* AppSection.swift in Sources */,
 				8A0000010000000000000003 /* ContentView.swift in Sources */,
 				8A0000010000000000000004 /* SidebarView.swift in Sources */,
-				8A0000010000000000000005 /* RepositoryDetailView.swift in Sources */,
-				8A0000010000000000000006 /* EmptyRepositoryView.swift in Sources */,
 				8A0000010000000000000007 /* ChangesView.swift in Sources */,
-				8A0000010000000000000008 /* FileStatusRow.swift in Sources */,
 				8A0000010000000000000011 /* DiffView.swift in Sources */,
 				8A0000010000000000000012 /* CommitPanelView.swift in Sources */,
 				8A0000010000000000000017 /* BranchesView.swift in Sources */,
@@ -341,6 +421,27 @@
 				8A000001000000000000000D /* ProcessExecutor.swift in Sources */,
 				8A000001000000000000000E /* GitStatusParser.swift in Sources */,
 				8A000001000000000000000F /* GitService.swift in Sources */,
+				8A0000030000000000000001 /* GitChange.swift in Sources */,
+				8A0000030000000000000002 /* GitCommit.swift in Sources */,
+				8A0000030000000000000003 /* GitDiff.swift in Sources */,
+				8A0000030000000000000004 /* GitLogParser.swift in Sources */,
+				8A0000030000000000000005 /* GitDiffParser.swift in Sources */,
+				8A0000030000000000000006 /* DeepLink.swift in Sources */,
+				8A0000030000000000000007 /* ViewState.swift in Sources */,
+				8A0000030000000000000008 /* RecentRepositories.swift in Sources */,
+				8A0000030000000000000009 /* ExternalApps.swift in Sources */,
+				8A000003000000000000000A /* Components.swift in Sources */,
+				8A000003000000000000000B /* HistoryView.swift in Sources */,
+				8A000003000000000000000C /* RepositoryView.swift in Sources */,
+				8A000003000000000000000D /* PullPreviewSheet.swift in Sources */,
+				8A000003000000000000000E /* WelcomeView.swift in Sources */,
+				8A0000040000000000000001 /* GitService+Commands.swift in Sources */,
+				8A0000070000000000000001 /* RepositorySafety.swift in Sources */,
+				8A0000040000000000000002 /* CommandSession.swift in Sources */,
+				8A0000040000000000000003 /* CommandViews.swift in Sources */,
+				8A0000040000000000000004 /* ChangeDialogs.swift in Sources */,
+				8A0000040000000000000005 /* RemoteDialogs.swift in Sources */,
+				8A0000040000000000000006 /* RepositoryDialogs.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -349,6 +450,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8A0000020000000000000001 /* FinderSyncExtension.swift in Sources */,
+				8A0000030000000000002006 /* DeepLink.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -476,6 +578,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
@@ -500,6 +603,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
@@ -524,6 +628,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = GitView/GitViewFinderExtension/GitViewFinderExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
@@ -550,6 +655,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = GitView/GitViewFinderExtension/GitViewFinderExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;

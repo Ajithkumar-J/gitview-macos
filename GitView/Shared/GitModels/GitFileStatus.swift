@@ -14,7 +14,9 @@ public enum GitFileState: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-public struct GitFileStatus: Identifiable, Equatable, Sendable {
+/// One entry of `git status`. `indexStatus` / `workingTreeStatus` are the
+/// porcelain `X` / `Y` columns, with `" "` meaning "unchanged".
+public struct GitFileStatus: Identifiable, Hashable, Sendable {
     public let path: String
     public let indexStatus: Character
     public let workingTreeStatus: Character
@@ -25,7 +27,7 @@ public struct GitFileStatus: Identifiable, Equatable, Sendable {
     }
 
     public var state: GitFileState {
-        if indexStatus == "?" && workingTreeStatus == "?" {
+        if isUntracked {
             return .untracked
         }
 
@@ -59,9 +61,28 @@ public struct GitFileStatus: Identifiable, Equatable, Sendable {
         indexStatus != " " && indexStatus != "?"
     }
 
+    public var isUntracked: Bool {
+        indexStatus == "?" && workingTreeStatus == "?"
+    }
+
     public var isConflicted: Bool {
         let pair = "\(indexStatus)\(workingTreeStatus)"
         return ["DD", "AU", "UD", "UA", "DU", "AA", "UU"].contains(pair)
+    }
+
+    /// The file has changes recorded in the index (shown under "Staged Changes").
+    public var hasStagedChanges: Bool {
+        !isConflicted && !isUntracked && indexStatus != " "
+    }
+
+    /// The file has working-tree changes not yet in the index (shown under "Changes").
+    public var hasUnstagedChanges: Bool {
+        !isConflicted && !isUntracked && workingTreeStatus != " "
+    }
+
+    /// Paths that must be passed to Git so that both sides of a rename are handled.
+    public var allPaths: [String] {
+        [originalPath, path].compactMap { $0 }
     }
 
     public init(path: String, indexStatus: Character, workingTreeStatus: Character, originalPath: String? = nil) {

@@ -5,8 +5,13 @@ public enum GitServiceError: LocalizedError, Equatable {
     case notARepository(String)
     case emptyCommitMessage
     case noFilesSelected
+    case nothingStaged
     case emptyPullSource
+    case noRemoteConfigured
     case detachedHeadRemoteOperation
+    case identityNotConfigured
+    case invalidName(kind: String, value: String)
+    case repositoryNotTrusted(String)
     case commandFailed(GitCommandResult)
 
     public var errorDescription: String? {
@@ -14,22 +19,108 @@ public enum GitServiceError: LocalizedError, Equatable {
         case .gitExecutableNotFound:
             "Git is not installed or could not be found."
         case .notARepository(let path):
-            "\(path) is not part of a Git repository."
+            "This folder is not part of a Git repository.\n\n\(path)"
         case .emptyCommitMessage:
             "Enter a commit message before committing."
         case .noFilesSelected:
-            "Select at least one file to commit."
+            "Select at least one file."
+        case .nothingStaged:
+            "Stage at least one file before committing."
         case .emptyPullSource:
             "Enter a branch to pull from, for example development or origin/development."
+        case .noRemoteConfigured:
+            "This repository has no remote configured."
         case .detachedHeadRemoteOperation:
             "Pull and push are unavailable while the repository is in detached HEAD state."
+        case .identityNotConfigured:
+            "Git doesn't know your name and email address yet."
+        case .repositoryNotTrusted(let name):
+            "GitView didn't open “\(name)” because you chose not to trust its settings. Nothing was run."
+        case .invalidName(let kind, let value):
+            "“\(DisplayText.visible(value, keepNewlines: false))” is not a valid \(kind) name. Names can't start with “-” or contain control characters."
         case .commandFailed(let result):
-            result.standardError.isEmpty ? result.standardOutput : result.standardError
+            Self.message(for: result)
         }
+    }
+
+    /// Plain-language advice for common failures, shown next to Git's own output.
+    public var recoverySuggestion: String? {
+        switch self {
+        case .identityNotConfigured:
+            GitFailureHint.identity
+        case .commandFailed(let result):
+            GitFailureHint.suggestion(for: result.standardError + "\n" + result.standardOutput)
+        default:
+            nil
+        }
+    }
+
+    private static func message(for result: GitCommandResult) -> String {
+        let error = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = [error, output].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        return text.isEmpty ? "Git exited with code \(result.exitCode)." : Redactor.redact(text)
     }
 }
 
+/// Recognises sign-in, SSH, network and identity failures in Git's output.
+public enum GitFailureHint {
+    static let identity = "Enter your name and email in the commit window, or run in Terminal:\ngit config --global user.name \"Your Name\"\ngit config --global user.email you@example.com"
+
+    public static func suggestion(for output: String) -> String? {
+        let text = output.lowercased()
+        func has(_ needles: String...) -> Bool { needles.contains { text.contains($0) } }
+
+        if has("detected dubious ownership") {
+            return "This repository belongs to another user account, so Git refuses to work in it (a protection against repositories that could run code). "
+                + "If you trust it, run in Terminal: git config --global --add safe.directory <repository path>"
+        }
+        if has("remote host identification has changed") {
+            return "WARNING: the server's identity changed since you last connected. Someone may be intercepting the connection. "
+                + "Don't continue unless your administrator confirms the server's key was replaced; then remove the old key with ssh-keygen -R <host>."
+        }
+        if has("author identity unknown", "unable to auto-detect email", "empty ident name") {
+            return identity
+        }
+        if has("could not read username", "could not read password", "terminal prompts disabled",
+               "authentication failed", "invalid username or password", "invalid credentials",
+               "password authentication was removed", "returned error: 401", "http basic: access denied") {
+            return "Sign-in was cancelled or the server rejected it. Run the command again and sign in when GitView asks. "
+                + "GitHub, GitLab, Azure DevOps and Bitbucket need a personal access token (or app password) "
+                + "in the password field, not your account password. A rejected password is removed from the Keychain, so you will be asked again."
+        }
+        if has("permission denied (publickey") {
+            return "The server did not accept your SSH key. Add your public key (for example ~/.ssh/id_ed25519.pub) "
+                + "to your account's SSH settings, or switch the remote to its HTTPS URL and sign in with a token."
+        }
+        if has("host key verification failed") {
+            return "The server's identity was not confirmed. Run the command again and choose Connect when GitView asks "
+                + "whether to trust the server."
+        }
+        if has("returned error: 403", "permission to", "access denied", "you don't have permission") {
+            return "You are signed in, but this account does not have access. Check that you have write access to the "
+                + "repository, or that your token has the repo / write scope."
+        }
+        if has("repository not found", "does not appear to be a git repository", "not found\nfatal") {
+            return "The repository was not found, or your account cannot see it. Check the URL and that you signed in "
+                + "with an account that has access."
+        }
+        if has("could not resolve host", "failed to connect", "network is unreachable", "operation timed out", "connection timed out") {
+            return "GitView could not reach the server. Check your network or VPN connection and try again."
+        }
+        return nil
+    }
+}
+
+public struct GitCommitOutcome: Equatable, Sendable {
+    public let shortHash: String
+    public let subject: String
+    public let output: String
+}
+
 public final class GitService: Sendable {
+    public static let historyPageSize = 100
+
     private let executor: ProcessExecuting
     public let gitExecutableURL: URL
 
@@ -51,13 +142,18 @@ public final class GitService: Sendable {
 
     public static func resolveGitExecutable(fileManager: FileManager = .default) -> URL? {
         for path in AppConstants.gitExecutableCandidates where fileManager.isExecutableFile(atPath: path) {
+            // /usr/bin/git is only a shim when the Command Line Tools are missing;
+            // it then prompts to install them instead of running Git.
+            if path == "/usr/bin/git", !Self.commandLineToolsInstalled(fileManager: fileManager) {
+                continue
+            }
             return URL(fileURLWithPath: path)
         }
 
         let pathEnvironment = ProcessInfo.processInfo.environment["PATH"] ?? ""
         for directory in pathEnvironment.split(separator: ":") {
             let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent("git")
-            if fileManager.isExecutableFile(atPath: candidate.path) {
+            if directory.hasPrefix("/"), candidate.path != "/usr/bin/git", fileManager.isExecutableFile(atPath: candidate.path) {
                 return candidate
             }
         }
@@ -65,21 +161,52 @@ public final class GitService: Sendable {
         return nil
     }
 
-    public func loadRepository(at selectedURL: URL) async throws -> GitRepositorySnapshot {
+    private static func commandLineToolsInstalled(fileManager: FileManager) -> Bool {
+        fileManager.fileExists(atPath: "/Library/Developer/CommandLineTools/usr/bin/git")
+            || fileManager.fileExists(atPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/git")
+            || (try? fileManager.contentsOfDirectory(atPath: "/Applications"))?.contains(where: { $0.hasPrefix("Xcode") && $0.hasSuffix(".app") }) == true
+    }
+
+    public func version() async -> String? {
+        guard let result = try? await runGit(["--version"], workingDirectory: nil), result.success else {
+            return nil
+        }
+        return result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Repository
+
+    /// Asked when a repository's own settings or hooks would make Git run programs;
+    /// returns true to trust them. Usually shows a dialog.
+    public typealias TrustDecision = @Sendable (RepositorySafetyReport) async -> Bool
+
+    /// Opens a repository: finds its root, makes sure its settings are trusted
+    /// (before any command that could run them, such as status), then reads it.
+    public func loadRepository(at selectedURL: URL, trust: TrustDecision) async throws -> GitRepositorySnapshot {
         let rootPath = try await repositoryRoot(for: selectedURL)
-        async let branch = currentBranch(in: rootPath)
-        async let files = status(in: rootPath)
-        let resolvedBranch = try await branch
-        let loadedFiles = try await files
-        let upstreamBranch = await currentUpstreamBranchBestEffort(in: rootPath)
+        let report = await safetyReport(in: rootPath)
+        if !RepositoryTrustStore.shared.isTrusted(report) {
+            guard await trust(report) else {
+                throw GitServiceError.repositoryNotTrusted(rootPath.lastPathComponent)
+            }
+            RepositoryTrustStore.shared.trust(report)
+        }
+        async let summaryTask = statusSummary(in: rootPath)
+        async let remotesTask = remotes(in: rootPath)
+        let summary = try await summaryTask
+        let remotes = await remotesTask
 
         return GitRepositorySnapshot(
             selectedPath: selectedURL,
             rootPath: rootPath,
-            branch: resolvedBranch,
-            upstreamBranch: upstreamBranch,
-            branches: [GitBranch(name: resolvedBranch, isCurrent: true)],
-            files: loadedFiles
+            branch: summary.isDetached ? "Detached HEAD" : (summary.branchHead ?? "Detached HEAD"),
+            isDetachedHead: summary.isDetached,
+            headOID: summary.headOID,
+            upstreamBranch: summary.upstream,
+            aheadCount: summary.aheadCount,
+            behindCount: summary.behindCount,
+            remotes: remotes,
+            files: summary.files
         )
     }
 
@@ -90,7 +217,7 @@ public final class GitService: Sendable {
         }
 
         let path = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return URL(fileURLWithPath: path)
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     public func currentBranch(in repositoryURL: URL) async throws -> String {
@@ -113,90 +240,86 @@ public final class GitService: Sendable {
         return upstream.isEmpty ? nil : upstream
     }
 
-    public func currentUpstreamBranchBestEffort(in repositoryURL: URL) async -> String? {
-        do {
-            return try await currentUpstreamBranch(in: repositoryURL)
-        } catch {
-            return nil
+    public func statusSummary(in repositoryURL: URL) async throws -> GitStatusSummary {
+        let result = try await runGit(
+            ["status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"],
+            workingDirectory: repositoryURL
+        )
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
         }
+
+        return GitStatusParser.parsePorcelainV2(result.standardOutput)
     }
 
     public func status(in repositoryURL: URL) async throws -> [GitFileStatus] {
-        let result = try await runGit(["status", "--porcelain"], workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        return GitStatusParser.parsePorcelainV1(result.standardOutput)
+        try await statusSummary(in: repositoryURL).files
     }
 
-    public func branches(in repositoryURL: URL) async throws -> [GitBranch] {
-        let result = try await runGit(["branch", "--format=%(refname:short)|%(HEAD)"], workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        return result.standardOutput
-            .split(whereSeparator: \.isNewline)
-            .compactMap { line in
-                let parts = String(line).components(separatedBy: "|")
-                guard let name = parts.first, !name.isEmpty else {
-                    return nil
-                }
-                return GitBranch(name: name, isCurrent: parts.dropFirst().first == "*")
-            }
-    }
-
-    public func searchRemoteBranches(matching query: String, in repositoryURL: URL) async throws -> [GitBranch] {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else {
+    public func remotes(in repositoryURL: URL) async -> [String] {
+        guard let result = try? await runGit(["remote"], workingDirectory: repositoryURL), result.success else {
             return []
         }
 
-        let pattern = "*\(trimmedQuery)*"
-        let result = try await runGit(["ls-remote", "--heads", "origin", pattern], workingDirectory: repositoryURL)
+        return result.standardOutput.split(whereSeparator: \.isNewline).map(String.init)
+    }
+
+    // MARK: - Branches
+
+    /// Local branches followed by remote-tracking branches already known locally.
+    public func branches(in repositoryURL: URL) async throws -> [GitBranch] {
+        let result = try await runGit(
+            ["for-each-ref", "--sort=-committerdate", GitLogParser.branchFormat, "refs/heads", "refs/remotes"],
+            workingDirectory: repositoryURL
+        )
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
 
+        return GitLogParser.parseBranches(result.standardOutput)
+    }
+
+    /// Branches on the server whose names contain every word of `query`
+    /// (ignoring case), including ones that are not fetched yet.
+    public func searchRemoteBranches(matching query: String, remote: String = "origin", in repositoryURL: URL) async throws -> [GitBranch] {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        let names = try await remoteBranchNames(remote: remote, in: repositoryURL)
+        return BranchSearch.unfetchedBranches(names, matching: query, remote: remote)
+    }
+
+    /// Every branch name on `remote` (`git ls-remote --heads`), without the `refs/heads/` prefix.
+    public func remoteBranchNames(remote: String, in repositoryURL: URL) async throws -> [String] {
+        let remote = try GitArgument.name(remote, kind: "remote")
+        let result = try await runGit(["ls-remote", "--heads", "--end-of-options", remote], workingDirectory: repositoryURL)
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
+        }
         return result.standardOutput
             .split(whereSeparator: \.isNewline)
             .compactMap { line in
-                guard let ref = line.split(separator: "\t").last else {
+                guard let ref = line.split(separator: "\t").last, ref.hasPrefix("refs/heads/") else {
                     return nil
                 }
-
-                let branchName = ref.replacingOccurrences(of: "refs/heads/", with: "")
-                return GitBranch(name: "origin/\(branchName)", isCurrent: false, isRemote: true)
+                return String(ref.dropFirst("refs/heads/".count))
             }
     }
 
-    public func branchesBestEffort(in repositoryURL: URL, currentBranch: String) async -> [GitBranch] {
-        do {
-            let loadedBranches = try await branches(in: repositoryURL)
-            if loadedBranches.isEmpty, currentBranch != "Detached HEAD" {
-                return [GitBranch(name: currentBranch, isCurrent: true)]
-            }
-            return loadedBranches
-        } catch {
-            guard currentBranch != "Detached HEAD" else {
-                return []
-            }
-            return [GitBranch(name: currentBranch, isCurrent: true)]
-        }
-    }
-
-    public func diff(for file: GitFileStatus, mode: GitDiffMode, in repositoryURL: URL) async throws -> String {
-        if file.state == .untracked {
-            return try await untrackedFileDiff(for: file, in: repositoryURL)
-        }
-
+    public func switchBranch(to branch: GitBranch, in repositoryURL: URL) async throws -> String {
         let arguments: [String]
-        switch mode {
-        case .unstaged:
-            arguments = ["diff", "--", file.path]
-        case .staged:
-            arguments = ["diff", "--cached", "--", file.path]
+        var notes = [String]()
+        _ = try GitArgument.name(branch.name, kind: "branch")
+        if branch.isRemote, await localBranchExists(branch.localTrackingName, in: repositoryURL) {
+            arguments = ["switch", "--end-of-options", try GitArgument.name(branch.localTrackingName, kind: "branch")]
+        } else if branch.isRemote {
+            // --track needs the remote's fetch settings to cover the branch.
+            if let remote = branch.remoteName, let note = try await includeInFetch(remote: remote, branch: branch.localTrackingName, in: repositoryURL) {
+                notes.append(note)
+            }
+            arguments = ["switch", "--track", "--end-of-options", branch.name]
+        } else {
+            arguments = ["switch", "--end-of-options", branch.name]
         }
 
         let result = try await runGit(arguments, workingDirectory: repositoryURL)
@@ -204,33 +327,160 @@ public final class GitService: Sendable {
             throw GitServiceError.commandFailed(result)
         }
 
-        let diff = result.standardOutput.trimmingCharacters(in: .newlines)
-        if diff.isEmpty {
-            return "No \(mode.rawValue.lowercased()) diff is available for \(file.path)."
-        }
-
-        return diff
+        return (notes + [commandOutput(from: result)]).joined(separator: "\n\n")
     }
 
-    public func commitSelected(files: [GitFileStatus], message: String, in repositoryURL: URL) async throws -> String {
+    /// Repositories set up to fetch only some branches (`remote.<name>.fetch`
+    /// listing single branches) cannot track any other branch: Git refuses with
+    /// "starting point 'origin/x' is not a branch". Adds `branch` to the fetched
+    /// branches, as `git remote set-branches --add` does, when it is not covered.
+    /// Returns a note for the output when the configuration changed.
+    @discardableResult
+    func includeInFetch(remote: String, branch: String, in repositoryURL: URL) async throws -> String? {
+        let remote = try GitArgument.name(remote, kind: "remote")
+        let branch = try GitArgument.name(branch, kind: "branch")
+        let result = try await runGit(["config", "--get-all", "remote.\(remote).fetch"], workingDirectory: repositoryURL)
+        let refspecs = result.success ? result.standardOutput.split(whereSeparator: \.isNewline).map(String.init) : []
+        guard !Self.refspecs(refspecs, cover: "refs/heads/\(branch)") else {
+            return nil
+        }
+        try await runChecked(["remote", "set-branches", "--add", remote, branch], in: repositoryURL)
+        return "Added \(remote)/\(branch) to the branches this repository fetches (git remote set-branches --add \(remote) \(branch))."
+    }
+
+    /// True when one of the fetch refspecs maps `ref` (for example refs/heads/main).
+    static func refspecs(_ refspecs: [String], cover ref: String) -> Bool {
+        refspecs.contains { spec in
+            var spec = spec.trimmingCharacters(in: .whitespaces)
+            if spec.hasPrefix("^") { return false }
+            if spec.hasPrefix("+") { spec.removeFirst() }
+            let source = String(spec.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+            guard let star = source.firstIndex(of: "*") else {
+                return source == ref
+            }
+            let prefix = source[..<star]
+            let suffix = source[source.index(after: star)...]
+            return ref.count >= prefix.count + suffix.count && ref.hasPrefix(prefix) && ref.hasSuffix(suffix)
+        }
+    }
+
+    private func localBranchExists(_ branchName: String, in repositoryURL: URL) async -> Bool {
+        let result = try? await runGit(["show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"], workingDirectory: repositoryURL)
+        return result?.success == true
+    }
+
+    /// Fetches a single remote branch so it can be checked out.
+    public func fetchRemoteBranch(_ branch: GitBranch, in repositoryURL: URL) async throws -> String {
+        guard branch.isRemote, let remoteName = branch.remoteName else {
+            return ""
+        }
+
+        let remote = try GitArgument.name(remoteName, kind: "remote")
+        let remoteBranchName = try GitArgument.name(branch.localTrackingName, kind: "branch")
+        let note = try await includeInFetch(remote: remote, branch: remoteBranchName, in: repositoryURL)
+        let result = try await runGit(
+            ["fetch", "--end-of-options", remote, "\(remoteBranchName):refs/remotes/\(remote)/\(remoteBranchName)"],
+            workingDirectory: repositoryURL
+        )
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
+        }
+
+        return ([note].compactMap { $0 } + [commandOutput(from: result)]).joined(separator: "\n\n")
+    }
+
+    // MARK: - Diffs
+
+    public func diff(for change: GitChange, in repositoryURL: URL) async throws -> String {
+        try await diff(for: change.file, mode: change.diffMode, in: repositoryURL)
+    }
+
+    public func diff(for file: GitFileStatus, mode: GitDiffMode, in repositoryURL: URL) async throws -> String {
+        if file.isUntracked {
+            return try await untrackedFileDiff(for: file, in: repositoryURL)
+        }
+
+        var arguments = ["diff", "--no-color", "--no-ext-diff", "-M"]
+        if mode == .staged {
+            arguments.append("--cached")
+        }
+        arguments += ["--"] + file.allPaths
+
+        let result = try await runGit(arguments, workingDirectory: repositoryURL)
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
+        }
+
+        return result.standardOutput
+    }
+
+    private func untrackedFileDiff(for file: GitFileStatus, in repositoryURL: URL) async throws -> String {
+        let result = try await runGit(["diff", "--no-color", "--no-index", "--", "/dev/null", file.path], workingDirectory: repositoryURL)
+        // `diff --no-index` exits with 1 when the files differ, which is always the case here.
+        guard result.success || result.exitCode == 1 else {
+            throw GitServiceError.commandFailed(result)
+        }
+
+        return result.standardOutput
+    }
+
+    // MARK: - Staging
+
+    public func stage(_ files: [GitFileStatus], in repositoryURL: URL) async throws {
+        guard !files.isEmpty else {
+            throw GitServiceError.noFilesSelected
+        }
+
+        // `-A` also records deletions of the given paths.
+        try await runChecked(["add", "-A", "--"] + files.flatMap(\.allPaths), in: repositoryURL)
+    }
+
+    public func unstage(_ files: [GitFileStatus], in repositoryURL: URL) async throws {
+        guard !files.isEmpty else {
+            throw GitServiceError.noFilesSelected
+        }
+
+        // `git reset -- <paths>` also works before the first commit, unlike `git restore --staged`.
+        try await runChecked(["reset", "-q", "--"] + files.flatMap(\.allPaths), in: repositoryURL)
+    }
+
+    public func stageAll(in repositoryURL: URL) async throws {
+        try await runChecked(["add", "-A"], in: repositoryURL)
+    }
+
+    public func unstageAll(in repositoryURL: URL) async throws {
+        try await runChecked(["reset", "-q"], in: repositoryURL)
+    }
+
+    /// Discards working-tree changes for the file. Staged changes are kept.
+    public func discardChanges(_ change: GitChange, in repositoryURL: URL) async throws -> String {
+        switch change.area {
+        case .untracked:
+            try await runChecked(["clean", "-f", "--", change.path], in: repositoryURL)
+        case .unstaged:
+            try await runChecked(["restore", "--worktree", "--", change.path], in: repositoryURL)
+        case .staged, .conflicted:
+            try await runChecked(["restore", "--staged", "--worktree", "--source=HEAD", "--"] + change.file.allPaths, in: repositoryURL)
+        }
+
+        return "Discarded changes in \(change.path)."
+    }
+
+    // MARK: - Commit
+
+    /// Commits what is currently staged, like `git commit -m`.
+    public func commit(message: String, in repositoryURL: URL) async throws -> GitCommitOutcome {
         let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMessage.isEmpty else {
             throw GitServiceError.emptyCommitMessage
         }
 
-        guard !files.isEmpty else {
-            throw GitServiceError.noFilesSelected
+        let staged = try await status(in: repositoryURL).filter(\.hasStagedChanges)
+        guard !staged.isEmpty else {
+            throw GitServiceError.nothingStaged
         }
-
-        let unstageResult = try await runGit(["restore", "--staged", "--", "."], workingDirectory: repositoryURL)
-        guard unstageResult.success else {
-            throw GitServiceError.commandFailed(unstageResult)
-        }
-
-        let addArguments = ["add", "--"] + files.map(\.path)
-        let addResult = try await runGit(addArguments, workingDirectory: repositoryURL)
-        guard addResult.success else {
-            throw GitServiceError.commandFailed(addResult)
+        guard await identity(in: repositoryURL).isComplete else {
+            throw GitServiceError.identityNotConfigured
         }
 
         let commitResult = try await runGit(["commit", "-m", trimmedMessage], workingDirectory: repositoryURL)
@@ -238,37 +488,99 @@ public final class GitService: Sendable {
             throw GitServiceError.commandFailed(commitResult)
         }
 
-        let hashResult = try await runGit(["rev-parse", "--short", "HEAD"], workingDirectory: repositoryURL)
-        let hash = hashResult.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let infoResult = try await runGit(["log", "-1", "--format=%h%x1f%s"], workingDirectory: repositoryURL)
+        let info = infoResult.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\u{1f}", maxSplits: 1).map(String.init)
 
-        if hash.isEmpty {
-            return commitResult.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return "Commit successful: \(hash)"
+        return GitCommitOutcome(
+            shortHash: info.first ?? "",
+            subject: info.count > 1 ? info[1] : trimmedMessage,
+            output: commandOutput(from: commitResult)
+        )
     }
 
-    public func fetch(in repositoryURL: URL) async throws -> String {
-        let result = try await runGit(["fetch"], workingDirectory: repositoryURL)
+    // MARK: - History
+
+    /// Commits reachable from HEAD, newest first. `paths` limits the log to
+    /// commits touching those repository-relative paths.
+    public func history(limit: Int = GitService.historyPageSize, skip: Int = 0, paths: [String] = [], in repositoryURL: URL) async throws -> [GitCommit] {
+        let result = try await runGit(
+            ["log", "--max-count=\(limit)", "--skip=\(skip)", "--date=iso-strict", GitLogParser.logFormat, "HEAD", "--"] + paths,
+            workingDirectory: repositoryURL
+        )
+
+        guard result.success else {
+            // A repository without commits has no history; that is not an error.
+            let hasHead = try await runGit(["rev-parse", "--verify", "--quiet", "HEAD"], workingDirectory: repositoryURL).success
+            if !hasHead {
+                return []
+            }
+            throw GitServiceError.commandFailed(result)
+        }
+
+        return GitLogParser.parseLog(result.standardOutput)
+    }
+
+    public func commitDetail(hash: String, in repositoryURL: URL) async throws -> GitCommitDetail {
+        let hash = try GitArgument.commit(hash)
+        async let headerTask = runGit(["show", "-s", GitLogParser.detailFormat, "--end-of-options", hash], workingDirectory: repositoryURL)
+        async let filesTask = runGit(
+            ["show", "--format=", "--name-status", "-z", "-M", "--diff-merges=first-parent", "--no-ext-diff", "--end-of-options", hash],
+            workingDirectory: repositoryURL
+        )
+
+        let header = try await headerTask
+        guard header.success else {
+            throw GitServiceError.commandFailed(header)
+        }
+
+        let files = try await filesTask
+        guard files.success else {
+            throw GitServiceError.commandFailed(files)
+        }
+
+        guard let detail = GitLogParser.parseCommitDetail(header: header.standardOutput, nameStatus: files.standardOutput) else {
+            throw GitServiceError.commandFailed(header)
+        }
+
+        return detail
+    }
+
+    public func diff(for file: GitCommitFile, inCommit hash: String, in repositoryURL: URL) async throws -> String {
+        let hash = try GitArgument.commit(hash)
+        let result = try await runGit(
+            ["show", "--format=", "--no-color", "--no-ext-diff", "-M", "--diff-merges=first-parent", hash, "--"] + file.allPaths,
+            workingDirectory: repositoryURL
+        )
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
 
-        return commandOutput(from: result)
+        return result.standardOutput
     }
 
-    public func pullPreview(sourceBranch: String?, localFiles: [GitFileStatus], in repositoryURL: URL) async throws -> GitPullPreview {
+    // MARK: - Remote operations
+
+    public func fetch(in repositoryURL: URL) async throws -> String {
+        let result = try await runGit(["fetch", "--prune"], workingDirectory: repositoryURL)
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
+        }
+
+        return commandOutput(from: result, fallback: "Fetch complete. Already up to date.")
+    }
+
+    public func pullPreview(sourceBranch: String?, localFiles: [GitFileStatus], remote: String?, in repositoryURL: URL) async throws -> GitPullPreview {
         let branch = try await currentBranch(in: repositoryURL)
         guard branch != "Detached HEAD" else {
             throw GitServiceError.detachedHeadRemoteOperation
         }
 
-        let target = try await pullTarget(for: sourceBranch, in: repositoryURL)
+        let target = try await pullTarget(for: sourceBranch, remote: remote, in: repositoryURL)
 
-        if let sourceBranch = target.sourceBranch {
-            _ = try await fetchBranch(sourceBranch, in: repositoryURL)
+        if let sourceBranch = target.sourceBranch, let remote = target.remote {
+            _ = try await runChecked(["fetch", "--end-of-options", try GitArgument.name(remote, kind: "remote"), try GitArgument.name(sourceBranch, kind: "branch")], in: repositoryURL)
         } else {
-            _ = try await fetch(in: repositoryURL)
+            _ = try await runChecked(["fetch"], in: repositoryURL)
         }
 
         async let incomingFiles = incomingChangedFiles(from: target.comparisonRef, in: repositoryURL)
@@ -289,23 +601,15 @@ public final class GitService: Sendable {
         )
     }
 
-    public func incomingChangedFiles(in repositoryURL: URL) async throws -> [String] {
-        try await incomingChangedFiles(from: "@{u}", in: repositoryURL)
-    }
-
     public func incomingChangedFiles(from comparisonRef: String, in repositoryURL: URL) async throws -> [String] {
-        let result = try await runGit(["diff", "--name-only", "HEAD..\(comparisonRef)"], workingDirectory: repositoryURL)
+        let result = try await runGit(["diff", "--name-only", "-z", "HEAD...\(comparisonRef)"], workingDirectory: repositoryURL)
         guard result.success else {
             return []
         }
 
         return result.standardOutput
-            .split(whereSeparator: \.isNewline)
+            .split(separator: "\0")
             .map(String.init)
-    }
-
-    public func aheadBehind(in repositoryURL: URL) async throws -> (ahead: Int, behind: Int) {
-        try await aheadBehind(comparedTo: "@{u}", in: repositoryURL)
     }
 
     public func aheadBehind(comparedTo comparisonRef: String, in repositoryURL: URL) async throws -> (ahead: Int, behind: Int) {
@@ -325,24 +629,14 @@ public final class GitService: Sendable {
         return (ahead: counts[0], behind: counts[1])
     }
 
-    public func pull(strategy: GitPullStrategy, in repositoryURL: URL) async throws -> String {
-        let result = try await runGit(["pull"] + strategy.gitArguments, workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
+    public func pull(sourceBranch: String?, strategy: GitPullStrategy, remote: String?, in repositoryURL: URL) async throws -> String {
+        let target = try await pullTarget(for: sourceBranch, remote: remote, in: repositoryURL)
+        var arguments = ["pull"] + strategy.gitArguments
+        if let sourceBranch = target.sourceBranch, let remote = target.remote {
+            arguments += ["--end-of-options", try GitArgument.name(remote, kind: "remote"), try GitArgument.name(sourceBranch, kind: "branch")]
         }
 
-        return commandOutput(from: result)
-    }
-
-    public func pull(sourceBranch: String?, strategy: GitPullStrategy, in repositoryURL: URL) async throws -> String {
-        let target = try await pullTarget(for: sourceBranch, in: repositoryURL)
-        let result: GitCommandResult
-        if let sourceBranch = target.sourceBranch {
-            result = try await runGit(["pull"] + strategy.gitArguments + ["origin", sourceBranch], workingDirectory: repositoryURL)
-        } else {
-            result = try await runGit(["pull"] + strategy.gitArguments, workingDirectory: repositoryURL)
-        }
-
+        let result = try await runGit(arguments, workingDirectory: repositoryURL)
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
@@ -359,12 +653,19 @@ public final class GitService: Sendable {
         return commandOutput(from: result)
     }
 
-    public func pushSetUpstream(branch: String, in repositoryURL: URL) async throws -> String {
+    public func pushSetUpstream(branch: String, remote: String?, in repositoryURL: URL) async throws -> String {
         guard branch != "Detached HEAD" else {
             throw GitServiceError.detachedHeadRemoteOperation
         }
 
-        let result = try await runGit(["push", "--set-upstream", "origin", branch], workingDirectory: repositoryURL)
+        guard let remote else {
+            throw GitServiceError.noRemoteConfigured
+        }
+
+        let result = try await runGit(
+            ["push", "--set-upstream", "--end-of-options", try GitArgument.name(remote, kind: "remote"), try GitArgument.name(branch, kind: "branch")],
+            workingDirectory: repositoryURL
+        )
         guard result.success else {
             throw GitServiceError.commandFailed(result)
         }
@@ -372,135 +673,96 @@ public final class GitService: Sendable {
         return commandOutput(from: result)
     }
 
-    public func switchBranch(to branch: String, in repositoryURL: URL) async throws -> String {
-        let result = try await runGit(["switch", branch], workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        return commandOutput(from: result)
-    }
-
-    public func switchBranch(to branch: GitBranch, in repositoryURL: URL) async throws -> String {
-        let arguments: [String]
-        if branch.isRemote, await localBranchExists(branch.localTrackingName, in: repositoryURL) {
-            arguments = ["switch", branch.localTrackingName]
-        } else if branch.isRemote {
-            arguments = ["switch", "--track", branch.name]
-        } else {
-            arguments = ["switch", branch.name]
-        }
-
-        let result = try await runGit(arguments, workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        return commandOutput(from: result)
-    }
-
-    private func localBranchExists(_ branchName: String, in repositoryURL: URL) async -> Bool {
-        let result = try? await runGit(["show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"], workingDirectory: repositoryURL)
-        return result?.success == true
-    }
-
-    public func fetchRemoteBranch(_ branch: GitBranch, in repositoryURL: URL) async throws -> String {
-        guard branch.isRemote else {
-            return ""
-        }
-
-        let remoteBranchName = branch.localTrackingName
-        let result = try await runGit(["fetch", "origin", "\(remoteBranchName):refs/remotes/origin/\(remoteBranchName)"], workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        return commandOutput(from: result)
-    }
-
-    public func revert(file: GitFileStatus, in repositoryURL: URL) async throws -> String {
-        let result: GitCommandResult
-        if file.state == .untracked {
-            result = try await runGit(["clean", "-f", "--", file.path], workingDirectory: repositoryURL)
-        } else {
-            result = try await runGit(["restore", "--staged", "--worktree", "--", file.path], workingDirectory: repositoryURL)
-        }
-
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        let output = commandOutput(from: result)
-        return output == "Command completed successfully." ? "Reverted \(file.path)." : output
-    }
-
-    private func fetchBranch(_ sourceBranch: String, in repositoryURL: URL) async throws -> String {
-        let result = try await runGit(["fetch", "origin", sourceBranch], workingDirectory: repositoryURL)
-        guard result.success else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        return commandOutput(from: result)
-    }
-
-    private func pullTarget(for sourceBranch: String?, in repositoryURL: URL) async throws -> PullTarget {
+    private func pullTarget(for sourceBranch: String?, remote: String?, in repositoryURL: URL) async throws -> PullTarget {
         let trimmedSource = sourceBranch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmedSource.isEmpty {
-            guard let upstream = try await currentUpstreamBranch(in: repositoryURL) else {
+        let upstream = try await currentUpstreamBranch(in: repositoryURL)
+
+        if trimmedSource.isEmpty || trimmedSource == upstream {
+            guard let upstream else {
                 throw GitServiceError.emptyPullSource
             }
 
-            return PullTarget(displayName: upstream, sourceBranch: nil, comparisonRef: "@{u}")
+            // Name the upstream branch explicitly. A bare `git fetch`/`git pull` fetches every
+            // configured refspec, so one refspec for a branch deleted on the server
+            // ("couldn't find remote ref") would make the whole pull fail.
+            if let tracking = await upstreamRemoteAndBranch(in: repositoryURL) {
+                return PullTarget(displayName: upstream, remote: tracking.remote, sourceBranch: tracking.branch, comparisonRef: "FETCH_HEAD")
+            }
+            return PullTarget(displayName: upstream, remote: nil, sourceBranch: nil, comparisonRef: "@{u}")
         }
 
-        let remoteBranch = trimmedSource.removingPrefix("origin/")
+        guard let remote else {
+            throw GitServiceError.noRemoteConfigured
+        }
+
+        let remoteBranch = trimmedSource.removingPrefix("\(remote)/")
         guard !remoteBranch.isEmpty else {
             throw GitServiceError.emptyPullSource
         }
 
         return PullTarget(
-            displayName: "origin/\(remoteBranch)",
+            displayName: "\(remote)/\(remoteBranch)",
+            remote: remote,
             sourceBranch: remoteBranch,
-            comparisonRef: "origin/\(remoteBranch)"
+            // FETCH_HEAD is what was just fetched, even when no refspec maps this
+            // branch to a remote-tracking ref.
+            comparisonRef: "FETCH_HEAD"
         )
     }
 
-    private func runGit(_ arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
+    /// Remote name and remote branch the current branch tracks, e.g. ("origin", "development").
+    func upstreamRemoteAndBranch(in repositoryURL: URL) async -> (remote: String, branch: String)? {
+        guard let branch = try? await currentBranch(in: repositoryURL), branch != "Detached HEAD",
+              let result = try? await runGit(
+                ["for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/\(branch)"],
+                workingDirectory: repositoryURL
+              ), result.success else {
+            return nil
+        }
+        let fields = result.standardOutput.trimmingCharacters(in: .newlines).split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        guard fields.count == 2, !fields[0].isEmpty, fields[1].hasPrefix("refs/heads/") else {
+            return nil
+        }
+        return (fields[0], String(fields[1].dropFirst("refs/heads/".count)))
+    }
+
+    // MARK: - Process helpers
+
+    @discardableResult
+    func runChecked(_ arguments: [String], in repositoryURL: URL) async throws -> GitCommandResult {
+        let result = try await runGit(arguments, workingDirectory: repositoryURL)
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
+        }
+        return result
+    }
+
+    func runGit(_ arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
         try await executor.run(
             executableURL: gitExecutableURL,
             // Ignore working-tree executable-bit noise consistently for status,
             // diffs and staging without changing the repository's configuration.
-            arguments: ["-c", "core.filemode=false"] + arguments,
+            // quotePath=false keeps non-ASCII file names readable.
+            // Transports that run local commands (ext::, fd::) are always refused.
+            arguments: ["-c", "core.filemode=false", "-c", "core.quotePath=false", "-c", "color.ui=false",
+                        "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"] + arguments,
             workingDirectory: workingDirectory
         )
     }
 
-    private func commandOutput(from result: GitCommandResult) -> String {
+    func commandOutput(from result: GitCommandResult, fallback: String = "Command completed successfully.") -> String {
         let combinedOutput = [result.standardOutput, result.standardError]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
 
-        return combinedOutput.isEmpty ? "Command completed successfully." : combinedOutput
-    }
-
-    private func untrackedFileDiff(for file: GitFileStatus, in repositoryURL: URL) async throws -> String {
-        let result = try await runGit(["diff", "--no-index", "--", "/dev/null", file.path], workingDirectory: repositoryURL)
-        guard result.success || result.exitCode == 1 else {
-            throw GitServiceError.commandFailed(result)
-        }
-
-        let diff = result.standardOutput.trimmingCharacters(in: .newlines)
-        if diff.isEmpty {
-            return "No diff is available for \(file.path)."
-        }
-
-        return diff
+        return combinedOutput.isEmpty ? fallback : Redactor.redact(combinedOutput)
     }
 }
 
 private struct PullTarget: Sendable {
     let displayName: String
+    let remote: String?
     let sourceBranch: String?
     let comparisonRef: String
 }
