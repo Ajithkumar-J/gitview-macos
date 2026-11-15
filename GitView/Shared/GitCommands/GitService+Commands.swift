@@ -120,6 +120,75 @@ public extension GitService {
         return "Reverted \(count)."
     }
 
+    // MARK: - Revert parts of a file
+
+    /// What a partial revert changed, so it can be undone.
+    struct PartialRevert: Sendable, Equatable {
+        /// The reverted hunks, as a patch from the last commit to the file before the revert.
+        public let patch: String
+        /// Whether the staged copy held the same changes and was reverted too.
+        public let includedIndex: Bool
+        public let count: Int
+    }
+
+    /// The file's changes since the last commit, split into hunks. Nil for
+    /// binary files or output GitView can't split.
+    func changes(in file: GitFileStatus, in repositoryURL: URL) async throws -> GitFilePatch? {
+        // Fixed prefixes and no textconv/external diff, whatever the user's
+        // settings, so `git apply` accepts the patch exactly as shown.
+        let result = try await runChecked(
+            ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative",
+             "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", file.path],
+            in: repositoryURL
+        )
+        return GitFilePatch.parse(result.standardOutput)
+    }
+
+    /// Puts the chosen hunks back to the last commit. The working tree must
+    /// still match what was shown; otherwise Git refuses and nothing changes.
+    /// The staged copy is reverted too when it holds the same changes.
+    func revertChanges(_ ids: Set<Int>, of patch: GitFilePatch, in repositoryURL: URL) async throws -> PartialRevert {
+        let text = patch.patch(including: ids)
+        guard !text.isEmpty else {
+            throw GitServiceError.noChangesSelected
+        }
+        let index = try await applyPatch(text, reverse: true, toIndex: true, checkOnly: true, in: repositoryURL).success
+        try await applyChecked(text, reverse: true, toIndex: false, in: repositoryURL)
+        if index {
+            try await applyChecked(text, reverse: true, toIndex: true, in: repositoryURL)
+        }
+        return PartialRevert(patch: text, includedIndex: index, count: patch.hunks.filter { ids.contains($0.id) }.count)
+    }
+
+    /// Brings back changes removed by `revertChanges`.
+    func undoRevert(_ revert: PartialRevert, in repositoryURL: URL) async throws {
+        try await applyChecked(revert.patch, reverse: false, toIndex: false, in: repositoryURL)
+        if revert.includedIndex,
+           try await applyPatch(revert.patch, reverse: false, toIndex: true, checkOnly: true, in: repositoryURL).success {
+            try await applyChecked(revert.patch, reverse: false, toIndex: true, in: repositoryURL)
+        }
+    }
+
+    private func applyChecked(_ patch: String, reverse: Bool, toIndex: Bool, in repositoryURL: URL) async throws {
+        let result = try await applyPatch(patch, reverse: reverse, toIndex: toIndex, checkOnly: false, in: repositoryURL)
+        guard result.success else {
+            throw GitServiceError.commandFailed(result)
+        }
+    }
+
+    /// Runs `git apply` on a private temporary file holding `patch`.
+    private func applyPatch(_ patch: String, reverse: Bool, toIndex: Bool, checkOnly: Bool, in repositoryURL: URL) async throws -> GitCommandResult {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("GitView-\(UUID().uuidString).patch")
+        try Data(patch.utf8).write(to: file, options: .withoutOverwriting)
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        var arguments = ["apply", "--whitespace=nowarn"]
+        if reverse { arguments.append("--reverse") }
+        if toIndex { arguments.append("--cached") }
+        if checkOnly { arguments.append("--check") }
+        return try await runGit(arguments + ["--", file.path], workingDirectory: repositoryURL)
+    }
+
     // MARK: - Diff
 
     /// Working tree compared with the last commit (staged and unstaged together).
@@ -251,19 +320,28 @@ public extension GitService {
 
     // MARK: - Clone / Init
 
-    func clone(url: String, into directory: URL, branch: String?, recurseSubmodules: Bool) async throws -> String {
+    /// Clones `url`; `progress` receives Git's progress as it downloads.
+    func clone(url: String, into directory: URL, branch: String?, recurseSubmodules: Bool, progress: (@Sendable (GitProgress) -> Void)? = nil) async throws -> String {
         if let problem = GitArgument.cloneURLProblem(url) ?? GitArgument.folderNameProblem(directory.lastPathComponent) {
             throw GitServiceError.invalidName(kind: "repository URL", value: problem)
         }
-        var arguments = ["clone"]
+        var arguments = ["clone", "--progress"]
         if let branch, !branch.isEmpty { arguments += ["--branch", try GitArgument.name(branch, kind: "branch")] }
         if recurseSubmodules { arguments.append("--recurse-submodules") }
         arguments += ["--", url, directory.path]
-        let result = try await runGit(arguments, workingDirectory: directory.deletingLastPathComponent())
+        let tracker = GitProgress.Tracker(onUpdate: progress)
+        let result = try await runGit(arguments, workingDirectory: directory.deletingLastPathComponent(), onError: progress == nil ? nil : tracker.consume)
         guard result.success else {
-            throw GitServiceError.commandFailed(result)
+            throw GitServiceError.commandFailed(GitCommandResult(
+                exitCode: result.exitCode, standardOutput: result.standardOutput,
+                standardError: GitProgress.removingProgressLines(result.standardError), command: result.command
+            ))
         }
-        return commandOutput(from: result, fallback: "Cloned into \(directory.path).")
+        let output = GitCommandResult(
+            exitCode: result.exitCode, standardOutput: result.standardOutput,
+            standardError: GitProgress.removingProgressLines(result.standardError), command: result.command
+        )
+        return commandOutput(from: output, fallback: "Cloned into \(directory.path).")
     }
 
     func initRepository(at directory: URL) async throws -> String {
@@ -405,3 +483,115 @@ public actor RemoteBranchDirectory {
     }
 }
 
+// MARK: - Progress
+
+/// One progress line from Git's `--progress` output, such as
+/// "Receiving objects:  45% (450/1000), 1.20 MiB | 2.00 MiB/s".
+public struct GitProgress: Equatable, Sendable {
+    public let stage: String
+    /// Percent of this stage, when Git knows the total.
+    public let percent: Int?
+    /// Counts and speed, e.g. "450/1000 · 1.20 MiB | 2.00 MiB/s".
+    public let detail: String?
+
+    /// Share of a clone or fetch each stage covers, so one bar can run 0–100%.
+    private static let stages: [(name: String, start: Double, end: Double)] = [
+        ("enumerating objects", 0.00, 0.01), ("counting objects", 0.01, 0.03), ("compressing objects", 0.03, 0.05),
+        ("receiving objects", 0.05, 0.80), ("resolving deltas", 0.80, 0.95),
+        ("updating files", 0.95, 1.00), ("checking out files", 0.95, 1.00),
+    ]
+
+    /// Progress of the whole download (0…1), when the stage is known.
+    public var overallFraction: Double? {
+        guard let stage = Self.stages.first(where: { $0.name == self.stage.lowercased() }) else { return nil }
+        let fraction = Double(percent ?? 0) / 100
+        return stage.start + (stage.end - stage.start) * fraction
+    }
+
+    public static func parse(_ line: String) -> GitProgress? {
+        var text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("remote:") {
+            text = String(text.dropFirst("remote:".count)).trimmingCharacters(in: .whitespaces)
+        }
+        guard let colon = text.firstIndex(of: ":") else { return nil }
+        let stage = String(text[..<colon])
+        guard !stage.isEmpty, stage.count <= 40, stage.allSatisfy({ $0.isLetter || $0 == " " }) else { return nil }
+        let rest = text[text.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+
+        var percent: Int?
+        var detail: String?
+        if let percentSign = rest.firstIndex(of: "%"), let value = Int(rest[..<percentSign].trimmingCharacters(in: .whitespaces)) {
+            percent = min(max(value, 0), 100)
+            var remainder = rest[rest.index(after: percentSign)...].trimmingCharacters(in: .whitespaces)
+            if remainder.hasSuffix(", done.") { remainder.removeLast(", done.".count) }
+            remainder = remainder.replacingOccurrences(of: "(", with: "").replacingOccurrences(of: ")", with: "")
+            remainder = remainder.replacingOccurrences(of: ", ", with: " · ").trimmingCharacters(in: .whitespaces)
+            detail = remainder.isEmpty ? nil : remainder
+        } else if let count = Int(rest.split(separator: ",").first?.trimmingCharacters(in: .whitespaces) ?? "") {
+            detail = "\(count)"
+        } else {
+            return nil
+        }
+        return GitProgress(stage: stage, percent: percent, detail: detail)
+    }
+
+    /// Git rewrites progress lines in place with "\r"; keep only finished lines.
+    public static func removingProgressLines(_ text: String) -> String {
+        text.components(separatedBy: "\n").compactMap { line -> String? in
+            let last = line.components(separatedBy: "\r").last { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+            return parse(last) != nil && !last.contains(", done.") ? nil : last
+        }
+        .joined(separator: "\n")
+    }
+
+    /// Splits streamed output on "\r" and "\n" and reports each new progress line.
+    final class Tracker: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending = ""
+        private let onUpdate: (@Sendable (GitProgress) -> Void)?
+
+        init(onUpdate: (@Sendable (GitProgress) -> Void)?) {
+            self.onUpdate = onUpdate
+        }
+
+        lazy var consume: @Sendable (String) -> Void = { [weak self] text in self?.feed(text) }
+
+        private func feed(_ text: String) {
+            lock.lock()
+            pending += text
+            var lines = pending.components(separatedBy: CharacterSet(charactersIn: "\r\n"))
+            pending = lines.removeLast()
+            lock.unlock()
+            for line in lines {
+                if let progress = GitProgress.parse(line) {
+                    onUpdate?(progress)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Repository addresses
+
+public enum RemoteURL {
+    /// A comparable form: host and path, lowercased, without user info, scheme,
+    /// ".git" or trailing slash, so `git@host:a/b.git` matches `https://host/a/b`.
+    public static func normalized(_ url: String) -> String {
+        var text = url.trimmingCharacters(in: .whitespaces).lowercased()
+        if let scheme = text.range(of: "://") {
+            text = String(text[scheme.upperBound...])
+        } else if let colon = text.firstIndex(of: ":"), !text[..<colon].contains("/") {
+            // scp-like: user@host:path
+            text = text.replacingCharacters(in: colon...colon, with: "/")
+        }
+        if let at = text.firstIndex(of: "@"), !text[..<at].contains("/") {
+            text = String(text[text.index(after: at)...])
+        }
+        if let slash = text.firstIndex(of: "/"), let port = text[..<slash].firstIndex(of: ":") {
+            text.removeSubrange(port..<slash)
+        }
+        while text.hasSuffix("/") { text.removeLast() }
+        if text.hasSuffix(".git") { text.removeLast(4) }
+        return text
+    }
+}

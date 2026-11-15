@@ -327,5 +327,118 @@ final class GitServiceCommandTests: XCTestCase {
         XCTAssertTrue(GitService.refspecs(["+refs/heads/*:refs/remotes/origin/*"], cover: "refs/heads/a/b"))
         XCTAssertFalse(GitService.refspecs(["+refs/heads/main:refs/remotes/origin/main"], cover: "refs/heads/a"))
     }
+
+    func testCloneReportsProgressAndMatchesAddresses() async throws {
+        // Git's own progress lines.
+        let receiving = try XCTUnwrap(GitProgress.parse("Receiving objects:  45% (450/1000), 1.20 MiB | 2.00 MiB/s"))
+        XCTAssertEqual(receiving.stage, "Receiving objects")
+        XCTAssertEqual(receiving.percent, 45)
+        XCTAssertEqual(receiving.detail, "450/1000 · 1.20 MiB | 2.00 MiB/s")
+        XCTAssertEqual(try XCTUnwrap(receiving.overallFraction), 0.3875, accuracy: 0.001)
+        XCTAssertEqual(GitProgress.parse("remote: Compressing objects: 100% (12/12), done.")?.percent, 100)
+        XCTAssertEqual(GitProgress.parse("remote: Enumerating objects: 1234, done.")?.detail, "1234")
+        XCTAssertNil(GitProgress.parse("Cloning into 'repo'..."))
+        XCTAssertNil(GitProgress.parse("fatal: repository 'x' not found"))
+        XCTAssertEqual(
+            GitProgress.removingProgressLines("Cloning into 'r'...\nReceiving objects:  10% (1/10)\rReceiving objects: 100% (10/10), done.\nwarning: x"),
+            "Cloning into 'r'...\nReceiving objects: 100% (10/10), done.\nwarning: x"
+        )
+
+        // The same repository written different ways.
+        let forms = ["https://github.com/Owner/Repo.git", "git@github.com:owner/repo.git", "ssh://git@github.com:22/owner/repo", "https://me@github.com/owner/repo/"]
+        XCTAssertEqual(Set(forms.map(RemoteURL.normalized)), ["github.com/owner/repo"])
+        XCTAssertNotEqual(RemoteURL.normalized("https://github.com/owner/other"), RemoteURL.normalized(forms[0]))
+
+        // A real clone over file:// (a full transfer, like a network clone) reports progress.
+        for index in 0..<40 {
+            try write(String(repeating: "line \(index)\n", count: 200), to: "dir/file\(index).txt")
+        }
+        _ = try await service.commit(message: "Files", files: try await files(), in: repository)
+        let remote = sandbox.appendingPathComponent("remote.git")
+        try await git("clone", "-q", "--bare", repository.path, remote.path, in: sandbox)
+
+        final class Collected: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items = [GitProgress]()
+            func add(_ item: GitProgress) { lock.lock(); items.append(item); lock.unlock() }
+            var all: [GitProgress] { lock.lock(); defer { lock.unlock() }; return items }
+        }
+        let collected = Collected()
+        let destination = sandbox.appendingPathComponent("progress clone")
+        let output = try await service.clone(url: "file://" + remote.path, into: destination, branch: nil, recurseSubmodules: false, progress: { collected.add($0) })
+        XCTAssertTrue(collected.all.contains { $0.stage == "Receiving objects" && $0.percent == 100 }, "\(collected.all)")
+        XCTAssertFalse(output.contains("\r"), "Progress redraws are removed from the output")
+    }
+
+    func testRevertSingleChangesInsideAFile() async throws {
+        // 30 lines so three edits become three separate changes.
+        let original = (1...30).map { "line \($0)" }
+        try write(original.joined(separator: "\n") + "\n", to: "notes.txt")
+        try await git("add", ".")
+        try await git("commit", "-q", "-m", "Initial")
+
+        var edited = original
+        edited[1] = "first edit"
+        edited[14] = "second edit"
+        edited.insert("third edit", at: 27)
+        let editedText = edited.joined(separator: "\n") + "\n"
+        try write(editedText, to: "notes.txt")
+        let fileURL = repository.appendingPathComponent("notes.txt")
+
+        var file = try await files()[0]
+        XCTAssertTrue(file.allowsPartialRevert)
+        var patch = try await service.changes(in: file, in: repository)
+        XCTAssertEqual(patch?.hunks.count, 3)
+        XCTAssertEqual(patch?.hunks[1].lineDescription, "Line 15")
+
+        // Revert only the middle change.
+        let revert = try await service.revertChanges([1], of: XCTUnwrap(patch), in: repository)
+        XCTAssertEqual(revert.count, 1)
+        XCTAssertFalse(revert.includedIndex)
+        var expected = edited
+        expected[14] = "line 15"
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), expected.joined(separator: "\n") + "\n")
+
+        // Undo brings it back.
+        try await service.undoRevert(revert, in: repository)
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), editedText)
+
+        // Staged copy with the same changes is reverted too.
+        try await git("add", "notes.txt")
+        file = try await files()[0]
+        patch = try await service.changes(in: file, in: repository)
+        let staged = try await service.revertChanges([0, 2], of: XCTUnwrap(patch), in: repository)
+        XCTAssertTrue(staged.includedIndex)
+        let cached = try await git("diff", "--cached")
+        XCTAssertFalse(cached.contains("first edit"))
+        XCTAssertTrue(cached.contains("second edit"))
+        XCTAssertFalse(try String(contentsOf: fileURL, encoding: .utf8).contains("third edit"))
+
+        // A file edited after it was shown is left alone.
+        file = try await files()[0]
+        patch = try await service.changes(in: file, in: repository)
+        try write("someone else changed it\n", to: "notes.txt")
+        do {
+            _ = try await service.revertChanges([0], of: XCTUnwrap(patch), in: repository)
+            XCTFail("Reverting a stale change should fail")
+        } catch let error as GitServiceError {
+            XCTAssertNotNil(error.recoverySuggestion)
+        }
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "someone else changed it\n")
+    }
+
+    func testPatchParsingKeepsLineEndingsAndRejectsOtherShapes() {
+        let crlf = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@ func x()\n one\r\n-two\r\n+TWO\r\n\n"
+        let patch = GitFilePatch.parse(crlf)
+        XCTAssertEqual(patch?.hunks.count, 1)
+        XCTAssertEqual(patch?.hunks[0].context, "func x()")
+        XCTAssertEqual(patch?.hunks[0].rawLines, [" one\r", "-two\r", "+TWO\r", " "], "CRLF kept; blank context line restored")
+        XCTAssertEqual(patch?.patch(including: [0]).hasSuffix("+TWO\r\n \n"), true)
+        XCTAssertEqual(patch?.patch(including: []), "")
+
+        XCTAssertNil(GitFilePatch.parse("diff --git a/b b/b\nBinary files a/b and b/b differ\n"))
+        XCTAssertNil(GitFilePatch.parse(crlf + crlf.replacingOccurrences(of: "a.txt", with: "b.txt")), "Only one file at a time")
+        XCTAssertNil(GitFilePatch.parse(""))
+    }
 }
 

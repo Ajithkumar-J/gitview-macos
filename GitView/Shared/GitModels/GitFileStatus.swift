@@ -92,3 +92,14 @@ public struct GitFileStatus: Identifiable, Hashable, Sendable {
         self.originalPath = originalPath
     }
 }
+
+public extension GitFileStatus {
+    /// Single changes can be reverted only in a tracked file that was modified
+    /// since the last commit: not new, deleted, renamed or in conflict.
+    var allowsPartialRevert: Bool {
+        let modified: Set<Character> = [" ", "M"]
+        return !isUntracked && !isConflicted && originalPath == nil
+            && modified.contains(indexStatus) && modified.contains(workingTreeStatus)
+            && (indexStatus, workingTreeStatus) != (" ", " ")
+    }
+}

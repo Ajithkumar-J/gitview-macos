@@ -4,12 +4,18 @@ import SwiftUI
 import Shared
 #endif
 
-/// Button offered on the result screen, e.g. "Push…" after a commit.
+/// Button offered on the result screen, e.g. "Push…" after a commit. With
+/// `menuItems` it is a small drop-down of next steps instead.
 struct CommandFollowUp: Identifiable {
     let id = UUID()
     let title: String
     let systemImage: String
-    let perform: @MainActor () -> Void
+    var menuItems: [CommandFollowUp] = []
+    var perform: @MainActor () -> Void = {}
+
+    static func menu(_ title: String, systemImage: String, _ items: [CommandFollowUp]) -> CommandFollowUp {
+        CommandFollowUp(title: title, systemImage: systemImage, menuItems: items)
+    }
 }
 
 // MARK: - Root
@@ -38,7 +44,7 @@ struct CommandRootView: View {
         }
         .overlay {
             if let title = session.runningTitle {
-                RunningOverlay(title: title)
+                RunningOverlay(title: title, progress: session.progress)
             }
         }
         .frame(minWidth: 460, minHeight: 300)
@@ -51,6 +57,7 @@ struct CommandRootView: View {
         case .status, .diff: StatusDialog(session: session)
         case .add: FileActionDialog(session: session, kind: .add)
         case .revert: FileActionDialog(session: session, kind: .revert)
+        case .revertChanges: RevertChangesDialog(session: session)
         case .log: LogDialog(session: session)
         case .pull: PullDialog(session: session)
         case .fetch: FetchDialog(session: session)
@@ -68,19 +75,44 @@ struct CommandRootView: View {
 
 private struct RunningOverlay: View {
     let title: String
+    var progress: GitProgress?
 
     var body: some View {
         ZStack {
             Rectangle().fill(.background.opacity(0.55))
             VStack(spacing: 12) {
-                ProgressView()
-                    .controlSize(.large)
+                if let progress, let fraction = progress.overallFraction {
+                    // Determinate: the whole download, 0–100%.
+                    Text("\(Int((fraction * 100).rounded()))%")
+                        .font(.system(size: 30, weight: .semibold, design: .rounded).monospacedDigit())
+                        .contentTransition(.numericText())
+                    ProgressView(value: fraction)
+                        .frame(width: 260)
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                }
                 Text(title)
                     .font(.headline)
-                Text("Waiting for Git…")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                if let progress {
+                    VStack(spacing: 2) {
+                        Text(progress.percent.map { "\(progress.stage) — \($0)%" } ?? progress.stage)
+                            .font(.callout)
+                        if let detail = progress.detail {
+                            Text(detail)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .animation(nil, value: progress)
+                } else {
+                    Text("Waiting for Git…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .frame(minWidth: 300)
+            .animation(.easeOut(duration: 0.2), value: progress?.overallFraction)
             .padding(28)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
@@ -178,10 +210,25 @@ struct CommandResultView: View {
                     Button("Back") { session.result = nil }
                 }
                 ForEach(session.followUps) { followUp in
-                    Button {
-                        followUp.perform()
-                    } label: {
-                        Label(followUp.title, systemImage: followUp.systemImage)
+                    if followUp.menuItems.isEmpty {
+                        Button {
+                            followUp.perform()
+                        } label: {
+                            Label(followUp.title, systemImage: followUp.systemImage)
+                        }
+                    } else {
+                        Menu {
+                            ForEach(followUp.menuItems) { item in
+                                Button {
+                                    item.perform()
+                                } label: {
+                                    Label(item.title, systemImage: item.systemImage)
+                                }
+                            }
+                        } label: {
+                            Label(followUp.title, systemImage: followUp.systemImage)
+                        }
+                        .fixedSize()
                     }
                 }
                 Spacer()
@@ -250,15 +297,13 @@ struct DialogFooter<Content: View>: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 10) {
+                Button(cancelTitle) { session.close() }
+                    .keyboardShortcut(.cancelAction)
+                    .fixedSize()
+                Spacer(minLength: 12)
                 content
             }
             .padding(14)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .overlay(alignment: .leading) {
-                Button(cancelTitle) { session.close() }
-                    .keyboardShortcut(.cancelAction)
-                    .padding(.leading, 14)
-            }
         }
     }
 }
@@ -299,6 +344,9 @@ struct FileChecklist: View {
     var showsCheckboxes = true
     var isCheckable: (GitFileStatus) -> Bool = { _ in true }
 
+    @State private var pendingRevert: GitFileStatus?
+    @State private var revertError: String?
+
     var body: some View {
         List(selection: $selection) {
             ForEach(files) { file in
@@ -309,8 +357,19 @@ struct FileChecklist: View {
         .listStyle(.inset)
         .contextMenu(forSelectionType: GitFileStatus.ID.self) { ids in
             if let file = files.first(where: { ids.contains($0.id) }), let root = session.root {
-                Button("Diff") { session.openCommand(.diff, paths: [root.appendingPathComponent(file.path).path]) }
-                Button("Show Log") { session.openCommand(.log, paths: [root.appendingPathComponent(file.path).path]) }
+                let fullPath = root.appendingPathComponent(file.path).path
+                Button("Diff") { session.openCommand(.diff, paths: [fullPath]) }
+                Button("Show Log") { session.openCommand(.log, paths: [fullPath]) }
+                if !file.isUntracked {
+                    Divider()
+                    if session.action != .revert {
+                        Button("Revert…") { pendingRevert = file }
+                    }
+                    // Commit and Check for Modifications already show a Revert button per change.
+                    if file.allowsPartialRevert, ![.commit, .status, .diff, .revertChanges].contains(session.action) {
+                        Button("Revert Specific Changes…") { session.openCommand(.revertChanges, paths: [fullPath]) }
+                    }
+                }
                 Divider()
                 Button("Open") { NSWorkspace.shared.open(root.appendingPathComponent(file.path)) }
                 Button("Reveal in Finder") { ExternalApps.revealInFinder(root.appendingPathComponent(file.path)) }
@@ -320,6 +379,33 @@ struct FileChecklist: View {
             if let file = files.first(where: { ids.contains($0.id) }), let root = session.root, session.action != .diff, session.action != .status {
                 session.openCommand(.diff, paths: [root.appendingPathComponent(file.path).path])
             }
+        }
+        .confirmationDialog(
+            "Revert “\((pendingRevert?.path as NSString?)?.lastPathComponent ?? "")”?",
+            isPresented: Binding(get: { pendingRevert != nil }, set: { if !$0 { pendingRevert = nil } }),
+            presenting: pendingRevert
+        ) { file in
+            Button("Revert", role: .destructive) { revert(file) }
+        } message: { _ in
+            Text("All local changes to this file, staged or not, will be permanently lost.")
+        }
+        .alert("Couldn’t Revert", isPresented: Binding(get: { revertError != nil }, set: { if !$0 { revertError = nil } })) {
+            Button("OK") { revertError = nil }
+        } message: {
+            Text(revertError ?? "")
+        }
+    }
+
+    /// Reverts one file in place, keeping this window open.
+    private func revert(_ file: GitFileStatus) {
+        guard let service = session.service, let root = session.root else { return }
+        Task {
+            do {
+                _ = try await service.revert([file], in: root)
+            } catch {
+                revertError = error.localizedDescription
+            }
+            session.repositoryDidChange()
         }
     }
 

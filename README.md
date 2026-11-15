@@ -91,7 +91,7 @@ Right-click in Finder, the same way you would with TortoiseGit on Windows:
 
 | To… | Right-click on | Choose |
 |---|---|---|
-| Get a repository | An empty folder | **Git Clone…** (a URL you copied is filled in for you) |
+| Get a repository | An empty folder | **Git Clone…** (a URL you copied is filled in for you; ⌄ lists addresses you cloned with GitView before). Shows download progress in %. |
 | Start a new repository | A project folder | **Git Create Repository Here…** |
 | See what changed | The repository, a folder or a file | **GitView ▸ Check for Modifications** (or **Diff** on a single file) |
 | Commit | The repository, or only the files/folders to include | **Git Commit → “branch”…**, tick the files, write a message, then **Commit** (⌘↩) or **Commit & Push** |
@@ -99,11 +99,14 @@ Right-click in Finder, the same way you would with TortoiseGit on Windows:
 | Share your commits | The repository | **GitView ▸ Push…** (lists outgoing commits and offers to publish a new branch) |
 | Change branch | The repository | **GitView ▸ Switch/Checkout…** |
 | Start a branch | The repository | **GitView ▸ Create Branch…** |
-| Put work aside | The repository | **GitView ▸ Stash Changes…**, later **Stash List / Pop…** |
+| Put work aside | The repository | **GitView ▸ Stash Changes…**, later **Stash List / Pop…**. After stashing, **Next Step ⌄** offers Pull…, Switch Branch… and Stash List… |
 | See history | The repository, a folder or a file | **GitView ▸ Show Log** (a file shows only its own history) |
-| Undo local edits | Files or folders | **GitView ▸ Revert…** (asks first) |
+| Undo local edits | Files or folders | **GitView ▸ Revert…** (whole files, asks first) |
+| Undo only some edits in a file | A modified file, folder or the repository | **GitView ▸ Revert Specific Changes…**: each change in the file is listed with its own **Revert** button, or tick several and choose **Revert Selected**. The rest of the file stays as you edited it. |
 | Track new files | Files or folders | **GitView ▸ Add…** |
 | Use the full app | Anything in the repository | **GitView ▸ Open in GitView** |
+
+In the **Commit** and **Check for Modifications** windows, a modified file's diff is split into its changes, each with a **Revert** button, so you can keep two edits and put the third back without opening the file. Right-click a file in the list for **Revert…** to undo the whole file. After reverting a change, **Undo** brings it back until you close the window. If the file was edited after GitView showed it, nothing is reverted and GitView asks you to refresh. New, deleted and renamed files can only be reverted whole.
 
 Each command opens its own small window and shows Git's output when it finishes. When something fails, a 💡 note above the output says what to do. If GitView was opened only for that command, it quits when you close the window.
 
@@ -196,7 +199,7 @@ The context menu works like TortoiseGit and adapts to what you right-click:
 | Right-click on | Menu |
 |---|---|
 | A folder that is not in a repository | **Git Clone…**, **Git Create Repository Here…** |
-| Anything inside a repository | **Git Commit → “branch”…** and a **GitView** submenu: Diff (files only), Show Log, Check for Modifications, Pull…, Fetch…, Push…, Switch/Checkout…, Create Branch…, Stash Changes…, Stash List / Pop…, Add…, Revert…, Open in GitView |
+| Anything inside a repository | **Git Commit → “branch”…** and a **GitView** submenu: Diff (files only), Show Log, Check for Modifications, Pull…, Fetch…, Push…, Switch/Checkout…, Create Branch…, Stash Changes…, Stash List / Pop…, Add…, Revert…, Revert Specific Changes…, Open in GitView |
 
 Every command except Open in GitView opens its own window, scoped to the selected files or folders (for example, Commit on `Sources/` lists only changes under `Sources/`, and Show Log on a file shows that file's history). The window shows Git's output when the command finishes and offers the natural next step (Push… after a commit, Pull… after switching branch, Open after a clone). When GitView was launched only for a Finder command, it quits when that window closes.
 
@@ -215,6 +218,16 @@ Finder will not reliably show the extension just because the source exists or be
 For local testing, install the built app into `~/Applications/GitView.app`.
 
 ### Install the Built App Locally
+
+The quickest way builds, installs to `~/Applications`, registers the Finder extension in a safe order and checks that Finder can see it:
+
+```sh
+scripts/install-local.sh            # build and install
+scripts/install-local.sh --no-build # install the last build
+```
+
+The manual steps follow. Unregister any copy in the build folder **before** registering the installed app: both copies share the extension's ID, so unregistering the build copy afterwards also removes the installed extension.
+
 
 Build the app with a deterministic derived data path:
 

@@ -41,6 +41,8 @@ final class CommandSession {
 
     /// Title of the operation currently running, if any.
     private(set) var runningTitle: String?
+    /// Git's latest progress for the running operation (clone), if it reports any.
+    var progress: GitProgress?
     var result: CommandResult?
     /// Buttons offered next to the result, e.g. "Push…" after a commit.
     var followUps: [CommandFollowUp] = []
@@ -176,7 +178,11 @@ final class CommandSession {
         _ body: @escaping () async throws -> String
     ) async -> Bool {
         runningTitle = title
-        defer { runningTitle = nil }
+        progress = nil
+        defer {
+            runningTitle = nil
+            progress = nil
+        }
         do {
             let output = try await body()
             self.followUps = followUps
@@ -193,6 +199,16 @@ final class CommandSession {
             )
             repositoryDidChange()
             return false
+        }
+    }
+
+    /// A callback for Git progress that updates this window on the main thread.
+    var progressHandler: @Sendable (GitProgress) -> Void {
+        { [weak self] progress in
+            Task { @MainActor in
+                guard let self, self.runningTitle != nil else { return }
+                self.progress = progress
+            }
         }
     }
 
@@ -229,7 +245,7 @@ final class CommandSession {
     var preferredSize: NSSize {
         switch action {
         case .commit: NSSize(width: 860, height: 700)
-        case .status, .diff: NSSize(width: 1000, height: 680)
+        case .status, .diff, .revertChanges: NSSize(width: 1000, height: 680)
         case .log: NSSize(width: 1180, height: 740)
         case .add, .revert: NSSize(width: 620, height: 520)
         case .pull, .push: NSSize(width: 620, height: 600)

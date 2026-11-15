@@ -2,12 +2,24 @@ import Foundation
 
 public protocol ProcessExecuting: Sendable {
     func run(executableURL: URL, arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult
+    /// Same, also handing standard error to `onError` as it arrives (Git writes progress there).
+    func run(executableURL: URL, arguments: [String], workingDirectory: URL?, onError: (@Sendable (String) -> Void)?) async throws -> GitCommandResult
+}
+
+public extension ProcessExecuting {
+    func run(executableURL: URL, arguments: [String], workingDirectory: URL?, onError: (@Sendable (String) -> Void)?) async throws -> GitCommandResult {
+        try await run(executableURL: executableURL, arguments: arguments, workingDirectory: workingDirectory)
+    }
 }
 
 public struct ProcessExecutor: ProcessExecuting {
     public init() {}
 
     public func run(executableURL: URL, arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
+        try await run(executableURL: executableURL, arguments: arguments, workingDirectory: workingDirectory, onError: nil)
+    }
+
+    public func run(executableURL: URL, arguments: [String], workingDirectory: URL?, onError: (@Sendable (String) -> Void)?) async throws -> GitCommandResult {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = executableURL
@@ -27,7 +39,11 @@ public struct ProcessExecutor: ProcessExecuting {
                 Self.read(outputPipe.fileHandleForReading)
             }
             let errorTask = Task.detached {
-                Self.read(errorPipe.fileHandleForReading)
+                Self.read(errorPipe.fileHandleForReading) { chunk in
+                    if let onError, let text = String(data: chunk, encoding: .utf8) {
+                        onError(text)
+                    }
+                }
             }
 
             process.waitUntilExit()
@@ -52,9 +68,12 @@ public struct ProcessExecutor: ProcessExecuting {
     /// or a hostile repository cannot exhaust memory.
     public static let outputLimit = 64 * 1024 * 1024
 
-    static func read(_ handle: FileHandle) -> Data {
+    static func read(_ handle: FileHandle, onChunk: ((Data) -> Void)? = nil) -> Data {
         var data = Data()
-        while let chunk = try? handle.read(upToCount: 256 * 1024), !chunk.isEmpty {
+        // Small reads while streaming so progress shows up promptly.
+        let size = onChunk == nil ? 256 * 1024 : 4096
+        while let chunk = try? handle.read(upToCount: size), !chunk.isEmpty {
+            onChunk?(chunk)
             if data.count < outputLimit {
                 data.append(chunk.prefix(outputLimit - data.count))
             }

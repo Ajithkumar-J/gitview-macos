@@ -5,6 +5,7 @@ public enum GitServiceError: LocalizedError, Equatable {
     case notARepository(String)
     case emptyCommitMessage
     case noFilesSelected
+    case noChangesSelected
     case nothingStaged
     case emptyPullSource
     case noRemoteConfigured
@@ -24,6 +25,8 @@ public enum GitServiceError: LocalizedError, Equatable {
             "Enter a commit message before committing."
         case .noFilesSelected:
             "Select at least one file."
+        case .noChangesSelected:
+            "Select at least one change."
         case .nothingStaged:
             "Stage at least one file before committing."
         case .emptyPullSource:
@@ -78,6 +81,9 @@ public enum GitFailureHint {
         if has("remote host identification has changed") {
             return "WARNING: the server's identity changed since you last connected. Someone may be intercepting the connection. "
                 + "Don't continue unless your administrator confirms the server's key was replaced; then remove the old key with ssh-keygen -R <host>."
+        }
+        if has("patch does not apply", "patch failed") {
+            return "The file changed after GitView showed it, so nothing was reverted. Refresh and try again."
         }
         if has("author identity unknown", "unable to auto-detect email", "empty ident name") {
             return identity
@@ -737,7 +743,7 @@ public final class GitService: Sendable {
         return result
     }
 
-    func runGit(_ arguments: [String], workingDirectory: URL?) async throws -> GitCommandResult {
+    func runGit(_ arguments: [String], workingDirectory: URL?, onError: (@Sendable (String) -> Void)? = nil) async throws -> GitCommandResult {
         try await executor.run(
             executableURL: gitExecutableURL,
             // Ignore working-tree executable-bit noise consistently for status,
@@ -746,7 +752,8 @@ public final class GitService: Sendable {
             // Transports that run local commands (ext::, fd::) are always refused.
             arguments: ["-c", "core.filemode=false", "-c", "core.quotePath=false", "-c", "color.ui=false",
                         "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"] + arguments,
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            onError: onError
         )
     }
 

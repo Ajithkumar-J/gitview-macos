@@ -15,6 +15,7 @@ public struct GitViewDeepLink: Equatable, Sendable {
         case log
         case add
         case revert
+        case revertChanges = "revert-changes"
         case pull
         case fetch
         case push
@@ -34,6 +35,7 @@ public struct GitViewDeepLink: Equatable, Sendable {
             case .log: "Show Log"
             case .add: "Add"
             case .revert: "Revert"
+            case .revertChanges: "Revert Specific Changes"
             case .pull: "Pull"
             case .fetch: "Fetch"
             case .push: "Push"
@@ -55,6 +57,7 @@ public struct GitViewDeepLink: Equatable, Sendable {
             case .log: "clock.arrow.circlepath"
             case .add: "plus.circle"
             case .revert: "arrow.uturn.backward.circle"
+            case .revertChanges: "arrow.uturn.backward.square"
             case .pull: "arrow.down.circle"
             case .fetch: "arrow.down.to.line.circle"
             case .push: "arrow.up.circle"

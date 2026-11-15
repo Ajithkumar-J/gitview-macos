@@ -386,10 +386,21 @@ struct StashSaveDialog: View {
         let includeUntracked = includeUntracked
         Task {
             await session.run("Stashing changes…", success: "Changes Stashed", followUps: [
-                CommandFollowUp(title: "Stash List…", systemImage: "tray.full") {
-                    session.openCommand(.stashPop, paths: [root.path])
-                    session.close()
-                },
+                // With the changes set aside, the usual next steps.
+                .menu("Next Step", systemImage: "arrow.right.circle", [
+                    CommandFollowUp(title: "Pull…", systemImage: "arrow.down.circle") {
+                        session.openCommand(.pull, paths: [root.path])
+                        session.close()
+                    },
+                    CommandFollowUp(title: "Switch Branch…", systemImage: "arrow.triangle.swap") {
+                        session.openCommand(.switchBranch, paths: [root.path])
+                        session.close()
+                    },
+                    CommandFollowUp(title: "Stash List…", systemImage: "tray.full") {
+                        session.openCommand(.stashPop, paths: [root.path])
+                        session.close()
+                    },
+                ]),
             ]) {
                 try await service.stashSave(message: message, includeUntracked: includeUntracked, in: root)
             }
@@ -493,6 +504,7 @@ struct CloneDialog: View {
     @State private var folderNameEdited = false
     @State private var branch = ""
     @State private var recurseSubmodules = false
+    private var history = CloneHistory.shared
     @FocusState private var isURLFocused: Bool
 
     private var destination: URL? {
@@ -518,10 +530,28 @@ struct CloneDialog: View {
 
             DialogForm {
                 FormRow(label: "URL") {
-                    TextField("https://github.com/owner/repo.git", text: $url)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($isURLFocused)
-                        .onSubmit { if problem == nil { perform() } }
+                    HStack(spacing: 4) {
+                        TextField("https://github.com/owner/repo.git", text: $url)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($isURLFocused)
+                            .onSubmit { if problem == nil { perform() } }
+                        Menu {
+                            Section("Cloned before") {
+                                ForEach(history.urls, id: \.self) { address in
+                                    Button(address) { url = address }
+                                }
+                            }
+                            Divider()
+                            Button("Clear History") { history.clear() }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .disabled(history.urls.isEmpty)
+                        .help(history.urls.isEmpty ? "Repositories you clone with GitView appear here" : "Repositories you cloned before")
+                    }
                 }
                 if let warning = GitArgument.cloneURLWarning(url) {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
@@ -626,7 +656,9 @@ struct CloneDialog: View {
                     ExternalApps.revealInFinder(destination)
                 },
             ]) {
-                try await service.clone(url: url, into: destination, branch: branch.isEmpty ? nil : branch, recurseSubmodules: recurseSubmodules)
+                let output = try await service.clone(url: url, into: destination, branch: branch.isEmpty ? nil : branch, recurseSubmodules: recurseSubmodules, progress: session.progressHandler)
+                CloneHistory.shared.add(url)
+                return output
             }
         }
     }

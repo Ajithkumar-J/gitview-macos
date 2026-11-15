@@ -18,6 +18,7 @@ struct CommitDialog: View {
     @State private var selection: GitFileStatus.ID?
     @State private var didInitialize = false
     @State private var diff = FileDiffLoader()
+    @State private var hunks = HunkRevertModel()
     @State private var hasIdentity = true
     @FocusState private var isMessageFocused: Bool
 
@@ -59,7 +60,7 @@ struct CommitDialog: View {
                     .frame(minHeight: 140, idealHeight: 170)
                 fileList
                     .frame(minHeight: 150, idealHeight: 250)
-                DiffPane(path: selectedFile?.path, originalPath: selectedFile?.originalPath, subtitle: selectedFile?.combinedKind.title, state: diff.state)
+                ChangesPane(session: session, file: selectedFile, hunks: hunks, diff: diff)
                     .frame(minHeight: 100, idealHeight: 220)
             }
 
@@ -78,10 +79,15 @@ struct CommitDialog: View {
             }
         }
         .onAppear(perform: initialize)
-        .onChange(of: session.snapshot?.files) { _, _ in
-            // Keep choices for files that are still changed; check new tracked files.
-            let ids = Set(files.map(\.id))
-            checked.formIntersection(ids)
+        .onChange(of: session.snapshot?.files) { oldFiles, _ in
+            // Keep choices for files that are still changed. Matched by path:
+            // a revert can change a file's status (and so its ID).
+            let old = oldFiles ?? []
+            let checkedPaths = Set(old.filter { checked.contains($0.id) }.map(\.path))
+            checked = Set(files.filter { checkedPaths.contains($0.path) }.map(\.id))
+            let selectedPath = old.first { $0.id == selection }?.path
+            selection = (files.first { $0.path == selectedPath } ?? files.first)?.id
+            diff.load(selectedFile, session: session)
         }
         .onChange(of: selection) { _, _ in diff.load(selectedFile, session: session) }
         .onChange(of: amend) { _, isAmending in
@@ -219,6 +225,7 @@ struct StatusDialog: View {
     @State private var selection: GitFileStatus.ID?
     @State private var showUnversioned = true
     @State private var diff = FileDiffLoader()
+    @State private var hunks = HunkRevertModel()
     @State private var noChecks = Set<GitFileStatus.ID>()
 
     private var files: [GitFileStatus] {
@@ -296,9 +303,10 @@ struct StatusDialog: View {
             diff.load(selectedFile, session: session)
         }
         .onChange(of: selection) { _, _ in diff.load(selectedFile, session: session) }
-        .onChange(of: session.snapshot?.files) { _, _ in
+        .onChange(of: session.snapshot?.files) { oldFiles, _ in
             if selectedFile == nil {
-                selection = files.first?.id
+                let selectedPath = oldFiles?.first { $0.id == selection }?.path
+                selection = (files.first { $0.path == selectedPath } ?? files.first)?.id
             }
             diff.load(selectedFile, session: session)
         }
@@ -308,12 +316,101 @@ struct StatusDialog: View {
     }
 
     private var diffPane: some View {
-        DiffPane(
-            path: selectedFile?.path,
-            originalPath: selectedFile?.originalPath,
-            subtitle: selectedFile.map { "\($0.combinedKind.title) · working tree compared with HEAD" },
-            state: diff.state
+        ChangesPane(
+            session: session,
+            file: selectedFile,
+            hunks: hunks,
+            diff: diff,
+            subtitle: selectedFile.map { "\($0.combinedKind.title) · working tree compared with HEAD" }
         )
+    }
+}
+
+// MARK: - Revert Specific Changes
+
+/// Pick changes inside modified files and put just those back to the last
+/// commit, e.g. keep two of three edits in a file.
+struct RevertChangesDialog: View {
+    let session: CommandSession
+
+    @State private var selection: GitFileStatus.ID?
+    @State private var diff = FileDiffLoader()
+    @State private var hunks = HunkRevertModel()
+    @State private var noChecks = Set<GitFileStatus.ID>()
+
+    private var files: [GitFileStatus] {
+        session.scopedFiles.filter(\.allowsPartialRevert)
+    }
+
+    private var selectedFile: GitFileStatus? {
+        files.first { $0.id == selection }
+    }
+
+    /// Right-clicked on one file in Finder: no need for a file list.
+    private var isSingleFile: Bool {
+        session.scopePaths.count == 1 && files.count == 1 && files[0].path == session.scopePaths[0]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DialogHeader(session: session)
+            Divider()
+            Text("Tick the changes to undo, or use Revert on one change. Those lines go back to the last commit; the rest of the file stays as it is.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            Divider()
+
+            if files.isEmpty && hunks.undoStack.isEmpty {
+                ContentUnavailableView(
+                    "No Modified Files",
+                    systemImage: "checkmark.seal",
+                    description: Text("There are no modified files in \(session.scopeDescription). New, deleted and renamed files can only be reverted whole with Revert….")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if isSingleFile {
+                pane
+            } else {
+                HSplitView {
+                    FileChecklist(session: session, files: files, checked: $noChecks, selection: $selection, showsCheckboxes: false)
+                        .frame(minWidth: 220, idealWidth: 280, maxWidth: 420)
+                    pane
+                        .frame(minWidth: 420)
+                }
+            }
+
+            DialogFooter(session: session, cancelTitle: "Close") {
+                Button("Revert Whole Files…") { session.openCommand(.revert) }
+                    .disabled(session.scopedFiles.allSatisfy(\.isUntracked))
+                Button("Commit…") {
+                    session.openCommand(.commit)
+                    session.close()
+                }
+                .disabled(session.scopedFiles.isEmpty)
+            }
+        }
+        .onAppear {
+            if selection == nil { selection = files.first?.id }
+            diff.load(selectedFile, session: session)
+        }
+        .onChange(of: selection) { _, _ in diff.load(selectedFile, session: session) }
+        .onChange(of: session.snapshot?.files) { oldFiles, _ in
+            if selectedFile == nil {
+                let selectedPath = oldFiles?.first { $0.id == selection }?.path
+                selection = (files.first { $0.path == selectedPath } ?? files.first)?.id
+            }
+            diff.load(selectedFile, session: session)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .gitViewRepositoryDidChange)) { _ in
+            // Changes made elsewhere (the main window, another command window).
+            Task { await session.reload() }
+        }
+    }
+
+    private var pane: some View {
+        ChangesPane(session: session, file: selectedFile, hunks: hunks, diff: diff, selectable: true)
     }
 }
 

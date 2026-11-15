@@ -91,6 +91,7 @@ final class FinderSyncExtension: FIFinderSync {
         menu.addItem(.separator())
         menu.addItem(item("Add…", #selector(add(_:)), .add))
         menu.addItem(item("Revert…", #selector(revert(_:)), .revert))
+        menu.addItem(item("Revert Specific Changes…", #selector(revertChanges(_:)), .revertChanges))
         menu.addItem(.separator())
         menu.addItem(item("Open in GitView", #selector(openGitView(_:)), .open))
         return menu
@@ -126,6 +127,7 @@ final class FinderSyncExtension: FIFinderSync {
     @objc private func stashPop(_ sender: Any?) { send(.stashPop) }
     @objc private func add(_ sender: Any?) { send(.add) }
     @objc private func revert(_ sender: Any?) { send(.revert) }
+    @objc private func revertChanges(_ sender: Any?) { send(.revertChanges) }
     @objc private func clone(_ sender: Any?) { send(.clone) }
     @objc private func createRepository(_ sender: Any?) { send(.createRepository) }
 
