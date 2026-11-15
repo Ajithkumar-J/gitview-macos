@@ -2,6 +2,12 @@
 
 GitView is a local SwiftUI macOS Git client for inspecting and working with repositories on the Mac. It is distributed outside the Mac App Store.
 
+Like TortoiseGit on Windows, it adds Git commands to Finder's right-click menu. Each command opens its own small window. There is also a full app window for changes, history and branches.
+
+<img src="docs/screenshots/finder-menu.png" alt="Finder right-click menu with Git Commit and the GitView submenu: Diff, Show Log, Pull, Push, Switch, Stash, Revert and more" width="520">
+
+See [Screenshots](#screenshots) for the command windows and the main app.
+
 ## Current Features
 
 - **Open repositories** from the Open panel (⌘O), the Recent list, drag and drop, or Finder. Selecting a subfolder or a file opens its repository root.
@@ -17,6 +23,26 @@ GitView is a local SwiftUI macOS Git client for inspecting and working with repo
 - **Sign-in and setup prompts**: GitView asks for your user name and token (or SSH passphrase) the first time a server needs them, asks whether to trust a new SSH server, and asks for your name and email before your first commit. Failures come with a plain-language explanation next to Git's output.
 
 **Security:** GitView asks before opening a repository whose own settings or hooks would run programs, refuses option-like names from repositories, and redacts credentials from everything it shows. See [SECURITY.md](SECURITY.md) for the full checklist and how to run the security tests.
+
+## Screenshots
+
+The main window: changes, staging and a diff.
+
+![GitView main window showing changes and a diff](docs/screenshots/main-changes.png)
+
+| Commit from Finder | Revert only some changes in a file |
+|---|---|
+| ![Commit window with file list and a diff split into changes, each with a Revert button](docs/screenshots/commit.png) | ![Revert Specific Changes window with three changes in cart.js](docs/screenshots/revert-changes.png) |
+| **Pull with a preview** | **Switch branch** |
+| ![Pull window listing two incoming commits and a possible conflict](docs/screenshots/pull.png) | ![Switch/Checkout window with local and remote branches](docs/screenshots/switch-branch.png) |
+| **History in the app** | **Branches in the app** |
+| ![History with commit details and a diff](docs/screenshots/main-history.png) | ![Branches list with local and remote branches](docs/screenshots/main-branches.png) |
+
+**Show Log** from Finder:
+
+![Show Log window with commits, details and a diff](docs/screenshots/log.png)
+
+The screenshots use a demo repository. To retake them after changing the UI, run `scripts/install-local.sh` and then `scripts/take-screenshots.sh` (add `--dark` for dark mode).
 
 ## Getting Started
 
