@@ -4,5 +4,18 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- Read-only access so the menu can tell whether a folder is inside a Git
+	     repository (looks for .git and reads .git/HEAD for the branch name).
+	     Limited to the places repositories live: the home folder, external
+	     volumes and /Users/Shared. No network access, so nothing read can leave. -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/Volumes/</string>
+		<string>/Users/Shared/</string>
+	</array>
 </dict>
 </plist>
