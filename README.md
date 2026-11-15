@@ -363,3 +363,7 @@ Then re-check System Settings and the Finder right-click menu.
 - The initial MVP intentionally avoids App Sandbox for the main app.
 - Finder integration is local-development oriented for now.
 - Public distribution, Developer ID signing, notarization, and sandboxing can be added after the core app is stable.
+
+## License
+
+GitView is released under the [MIT License](LICENSE).
