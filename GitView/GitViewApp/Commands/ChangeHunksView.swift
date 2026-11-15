@@ -195,21 +195,30 @@ struct HunkListView: View {
             header
             Divider()
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    ForEach(patch.hunks) { hunk in
-                        Section {
-                            ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
-                                lineRow(line)
-                            }
-                            Color.clear.frame(height: 10)
-                        } header: {
-                            hunkHeader(hunk)
-                        }
-                    }
+                // A plain stack draws every row at once (no blank rows while
+                // scrolling); very large diffs use a lazy one for speed.
+                if patch.hunks.reduce(0, { $0 + $1.lines.count }) <= 2_000 {
+                    VStack(alignment: .leading, spacing: 0) { hunkSections }
+                        .textSelection(.enabled)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) { hunkSections }
+                        .textSelection(.enabled)
                 }
-                .textSelection(.enabled)
             }
             .background(Color(nsColor: .textBackgroundColor))
+        }
+    }
+
+    private var hunkSections: some View {
+        ForEach(patch.hunks) { hunk in
+            Section {
+                ForEach(Array(hunk.lines.enumerated()), id: \.offset) { _, line in
+                    lineRow(line)
+                }
+                Color.clear.frame(height: 10)
+            } header: {
+                hunkHeader(hunk)
+            }
         }
     }
 
@@ -295,16 +304,18 @@ struct HunkListView: View {
         default: (" ", .clear)
         }
         return HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text(line.oldLineNumber.map(String.init) ?? "")
+            // A space, not "", for a missing number: an empty Text has no
+            // baseline and makes added/removed rows taller than the others.
+            Text(verbatim: line.oldLineNumber.map(String.init) ?? " ")
                 .frame(width: numberWidth, alignment: .trailing)
                 .foregroundStyle(.tertiary)
-            Text(line.newLineNumber.map(String.init) ?? "")
+            Text(verbatim: line.newLineNumber.map(String.init) ?? " ")
                 .frame(width: numberWidth, alignment: .trailing)
                 .foregroundStyle(.tertiary)
             Text(marker)
                 .frame(width: 20)
                 .foregroundStyle(.secondary)
-            Text(DisplayText.visible(line.text.replacingOccurrences(of: "\t", with: "    "), keepNewlines: false))
+            Text(verbatim: line.text.isEmpty ? " " : DisplayText.visible(line.text.replacingOccurrences(of: "\t", with: "    "), keepNewlines: false))
                 .foregroundStyle(line.kind == .noNewline ? .secondary : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

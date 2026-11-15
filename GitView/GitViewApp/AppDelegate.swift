@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.servicesProvider = servicesProvider
         NSUpdateDynamicServices()
+        #if DEBUG
+        ScreenshotTour.startIfRequested()
+        #endif
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -92,6 +95,13 @@ final class DeepLinkRouter {
     private var isWithinLaunch: Bool {
         Date().timeIntervalSince(launchDate) < 5
     }
+
+    #if DEBUG
+    /// The newest main window's model, for the README screenshot tour.
+    var newestModel: RepositoryViewModel? {
+        entries.last { $0.model != nil }?.model
+    }
+    #endif
 
     func register(_ model: RepositoryViewModel, window: NSWindow?) {
         entries.removeAll { $0.model == nil || $0.model === model }
